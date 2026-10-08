@@ -9,10 +9,9 @@ use rodio::{Decoder, MixerDeviceSink};
 use iced::advanced::svg::{Handle, Svg};
 use iced::futures::sink::SinkExt;
 use iced::futures::stream::StreamExt;
-use iced::widget::{canvas, center, column, container, row, space, text};
+use iced::widget::{Action, button, canvas, center, column, container, row, space, text};
 use iced::{Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
 
-use std::io::Cursor;
 use std::str::FromStr;
 
 const MOVE_SOUND: &[u8] = include_bytes!("../assets/sounds/Move.ogg");
@@ -60,7 +59,8 @@ struct Game {
 }
 
 enum Screen {
-    Tv(Game),
+    Watch(Game),
+    Play(Game),
 }
 
 #[allow(dead_code)]
@@ -68,10 +68,14 @@ enum Screen {
 enum Message {
     TvEvent(LichessTvFeedEvent),
     Tick(iced::time::Instant),
+    Watch,
+    Play,
+    ChessMove([shakmaty::Square; 2]),
 }
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
+        .centered()
         .subscription(App::subscription)
         .run()
 }
@@ -84,7 +88,7 @@ impl App {
         let audio_player = rodio::Player::connect_new(&sink_handle.mixer());
 
         App {
-            screen: Screen::Tv(Game::default()),
+            screen: Screen::Play(Game::default()),
             _sink_handle: sink_handle,
             audio_player,
         }
@@ -92,113 +96,131 @@ impl App {
 
     fn update(&mut self, message: Message) {
         match message {
+            Message::Watch => self.screen = Screen::Watch(Game::default()),
+            Message::Play => self.screen = Screen::Play(Game::default()),
             Message::Tick(_) => match self.screen {
-                Screen::Tv(ref mut tv_game) => match tv_game.position.turn() {
-                    shakmaty::Color::White => {
-                        if tv_game.white_clock > 0 {
-                            tv_game.white_clock -= 1;
+                Screen::Watch(ref mut game) => game.tick_clock(),
+                Screen::Play(ref mut game) => game.tick_clock(),
+            },
+            Message::ChessMove([from_square, to_square]) => match self.screen {
+                Screen::Play(ref mut game) => {
+                    if let Some(legal_move) =
+                        game.position.legal_moves().into_iter().find(|m| match m {
+                            shakmaty::Move::Normal { from: f, to: t, .. } => {
+                                *f == from_square && *t == to_square
+                            }
+                            shakmaty::Move::Castle { king, rook, .. } => {
+                                *king == from_square && *rook == to_square
+                            }
+                            shakmaty::Move::EnPassant { from: f, to: t, .. } => {
+                                *f == from_square && *t == to_square
+                            }
+                            shakmaty::Move::Put { .. } => false,
+                        })
+                    {
+                        if legal_move.is_capture() {
+                            if let Ok(source) = Decoder::new(std::io::Cursor::new(CAPTURE_SOUND)) {
+                                self.audio_player.stop();
+                                self.audio_player.append(source);
+                            }
+                        } else {
+                            if let Ok(source) = Decoder::new(std::io::Cursor::new(MOVE_SOUND)) {
+                                self.audio_player.stop();
+                                self.audio_player.append(source);
+                            }
+                        }
+                        if let Ok(new_pos) = game.position.clone().play(legal_move) {
+                            game.position = new_pos;
                         }
                     }
-                    shakmaty::Color::Black => {
-                        if tv_game.black_clock > 0 {
-                            tv_game.black_clock -= 1;
-                        }
-                    }
-                },
+                }
+                _ => {}
             },
             Message::TvEvent(event) => match self.screen {
-                Screen::Tv(ref mut tv_game) => match event {
+                Screen::Watch(ref mut game) => match event {
                     LichessTvFeedEvent::Fen(data) => {
                         let mut sound = MOVE_SOUND;
-                        tv_game.fen = data.fen;
-                        tv_game.white_clock = data.wc;
-                        tv_game.black_clock = data.bc;
-                        tv_game.last_move = data.lm;
-                        // if let Ok(last_move) = shakmaty::Move::from_str(&tv_game.last_move) {
-                        //     let source = last_move.get_source();
-                        //     let dest = last_move.get_dest();
-                        //     tv_game.last_move_source = Some(source);
-                        //     tv_game.last_move_dest = Some(dest);
-                        //     if is_capture(&tv_game.board, source, dest) {
-                        //         sound = CAPTURE_SOUND;
-                        //     }
-                        //     let mut new_board = tv_game.board.clone();
-                        //     tv_game.board.make_move(last_move, &mut new_board);
-                        //     tv_game.board = new_board;
-                        // }
+                        game.fen = data.fen;
+                        game.white_clock = data.wc;
+                        game.black_clock = data.bc;
+                        game.last_move = data.lm;
 
-                        if let Ok(uci) = tv_game.last_move.parse::<shakmaty::uci::UciMove>() {
-                            if let Ok(chess_move) = uci.to_move(&tv_game.position) {
-                                tv_game.last_move_source = chess_move.from();
-                                tv_game.last_move_dest = Some(chess_move.to());
+                        if let Ok(uci) = game.last_move.parse::<shakmaty::uci::UciMove>() {
+                            if let Ok(chess_move) = uci.to_move(&game.position) {
+                                game.last_move_source = chess_move.from();
+                                game.last_move_dest = Some(chess_move.to());
                                 if chess_move.is_capture() {
                                     sound = CAPTURE_SOUND;
                                 }
-                                tv_game.position.play_unchecked(chess_move);
+                                game.position.play_unchecked(chess_move);
                             }
                         }
 
-                        if let Ok(source) = Decoder::new(Cursor::new(sound)) {
+                        if let Ok(source) = Decoder::new(std::io::Cursor::new(sound)) {
                             self.audio_player.stop();
                             self.audio_player.append(source);
                         }
                     }
                     LichessTvFeedEvent::Featured(data) => {
-                        *tv_game = Game::default();
-                        tv_game.orientation = data.orientation;
+                        *game = Game::default();
+                        game.orientation = data.orientation;
                         for player in &data.players {
                             match player.color {
                                 LichessColor::White => {
-                                    tv_game.white_clock = player.seconds;
+                                    game.white_clock = player.seconds;
                                 }
                                 LichessColor::Black => {
-                                    tv_game.black_clock = player.seconds;
+                                    game.black_clock = player.seconds;
                                 }
                             }
                         }
-                        tv_game.players = data.players;
+                        game.players = data.players;
 
                         let fen = shakmaty::fen::Fen::from_str(&data.fen).unwrap_or_default();
-                        tv_game.position = fen
+                        game.position = fen
                             .into_position(shakmaty::CastlingMode::Standard)
                             .unwrap_or_default();
                     }
                     _ => {}
                 },
+                _ => {}
             },
         }
     }
 
     fn view(&self) -> iced::Element<'_, Message> {
         match &self.screen {
-            Screen::Tv(tv_game) => {
+            Screen::Watch(game) => {
                 let mut top_player = String::new();
                 let mut top_player_time = String::new();
                 let mut bottom_player = String::new();
                 let mut bottom_player_time = String::new();
 
-                for player in &tv_game.players {
+                for player in &game.players {
                     if let Some(ref user) = player.user {
-                        if player.color != tv_game.orientation {
+                        if player.color != game.orientation {
                             // top player
                             top_player = format!("{} ({})", user.name, player.rating);
                             if player.color == LichessColor::White {
-                                top_player_time = seconds_to_clock(tv_game.white_clock);
+                                top_player_time = seconds_to_clock(game.white_clock);
                             } else {
-                                top_player_time = seconds_to_clock(tv_game.black_clock);
+                                top_player_time = seconds_to_clock(game.black_clock);
                             }
                         } else {
                             // bottom player
                             bottom_player = format!("{} ({})", user.name, player.rating);
                             if player.color == LichessColor::White {
-                                bottom_player_time = seconds_to_clock(tv_game.white_clock);
+                                bottom_player_time = seconds_to_clock(game.white_clock);
                             } else {
-                                bottom_player_time = seconds_to_clock(tv_game.black_clock);
+                                bottom_player_time = seconds_to_clock(game.black_clock);
                             }
                         }
                     }
                 }
                 center(column![
+                    container(row![button("Play").on_press(Message::Play)])
+                        .width(640)
+                        .padding(5),
                     container(row![
                         text(top_player),
                         space::horizontal(),
@@ -206,9 +228,57 @@ impl App {
                     ])
                     .width(640)
                     .padding(5),
-                    canvas(tv_game)
-                        .height(SQUARE_SIZE * 8)
-                        .width(SQUARE_SIZE * 8),
+                    canvas(game).height(SQUARE_SIZE * 8).width(SQUARE_SIZE * 8),
+                    container(row![
+                        text(bottom_player),
+                        space::horizontal(),
+                        text(bottom_player_time)
+                    ])
+                    .width(640)
+                    .padding(5),
+                ])
+                .into()
+            }
+            Screen::Play(game) => {
+                let mut top_player = String::new();
+                let mut top_player_time = String::new();
+                let mut bottom_player = String::new();
+                let mut bottom_player_time = String::new();
+
+                for player in &game.players {
+                    if let Some(ref user) = player.user {
+                        if player.color != game.orientation {
+                            // top player
+                            top_player = format!("{} ({})", user.name, player.rating);
+                            if player.color == LichessColor::White {
+                                top_player_time = seconds_to_clock(game.white_clock);
+                            } else {
+                                top_player_time = seconds_to_clock(game.black_clock);
+                            }
+                        } else {
+                            // bottom player
+                            bottom_player = format!("{} ({})", user.name, player.rating);
+                            if player.color == LichessColor::White {
+                                bottom_player_time = seconds_to_clock(game.white_clock);
+                            } else {
+                                bottom_player_time = seconds_to_clock(game.black_clock);
+                            }
+                        }
+                    }
+                }
+
+                center(column![
+                    container(row![button("Watch").on_press(Message::Watch)])
+                        .width(640)
+                        .padding(5),
+                    container(row![
+                        text(top_player),
+                        space::horizontal(),
+                        text(top_player_time)
+                    ])
+                    .width(640)
+                    .padding(5),
+                    canvas(game).height(SQUARE_SIZE * 8).width(SQUARE_SIZE * 8),
                     container(row![
                         text(bottom_player),
                         space::horizontal(),
@@ -224,10 +294,11 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         match self.screen {
-            Screen::Tv(_) => Subscription::batch([
+            Screen::Watch(_) => Subscription::batch([
                 Subscription::run(lichess_tv),
                 iced::time::every(iced::time::Duration::from_secs(1)).map(Message::Tick),
             ]),
+            Screen::Play(_) => Subscription::none(),
         }
     }
 }
@@ -243,12 +314,152 @@ fn lichess_tv() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
-impl<Message> canvas::Program<Message> for Game {
-    type State = ();
+impl Game {
+    fn tick_clock(&mut self) {
+        match self.position.turn() {
+            shakmaty::Color::White => {
+                if self.white_clock > 0 {
+                    self.white_clock -= 1;
+                }
+            }
+            shakmaty::Color::Black => {
+                if self.black_clock > 0 {
+                    self.black_clock -= 1;
+                }
+            }
+        };
+    }
+
+    fn get_square(&self, x: u32, y: u32) -> shakmaty::Square {
+        match self.orientation {
+            LichessColor::White => {
+                shakmaty::Square::from_coords(shakmaty::File::new(x), shakmaty::Rank::new(7 - y))
+            }
+            LichessColor::Black => {
+                shakmaty::Square::from_coords(shakmaty::File::new(7 - x), shakmaty::Rank::new(y))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct GameProgramState {
+    hovering_piece: Option<shakmaty::Piece>,
+    dragging_piece: Option<shakmaty::Piece>,
+    drag_top_left: Point,
+    drag_from_square: Option<shakmaty::Square>,
+    drag_to_square: Option<shakmaty::Square>,
+}
+
+impl canvas::Program<Message> for Game {
+    type State = GameProgramState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &iced::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<Message>> {
+        match event {
+            iced::Event::Mouse(mouse_event) => match mouse_event {
+                mouse::Event::CursorMoved { position: _ } => {
+                    if let Some(point) = cursor.position_in(bounds) {
+                        let x = (point.x / SQUARE_SIZE as f32).floor();
+                        let y = (point.y / SQUARE_SIZE as f32).floor();
+                        state.drag_top_left = Point::new(
+                            point.x - (SQUARE_SIZE / 2) as f32,
+                            point.y - (SQUARE_SIZE / 2) as f32,
+                        );
+                        // if already dragging, request repaint
+                        if state.dragging_piece.is_some() {
+                            return Some(Action::request_redraw());
+                        }
+                        let square = self.get_square(x as u32, y as u32);
+                        if let Some(piece) = self.position.board().piece_at(square) {
+                            state.hovering_piece = Some(piece);
+                        } else {
+                            state.hovering_piece = None;
+                        }
+                    }
+                }
+                mouse::Event::ButtonPressed(button) => match button {
+                    mouse::Button::Left => {
+                        if let Some(point) = cursor.position_in(bounds) {
+                            let x = (point.x / SQUARE_SIZE as f32).floor();
+                            let y = (point.y / SQUARE_SIZE as f32).floor();
+                            state.drag_top_left = Point::new(
+                                point.x - (SQUARE_SIZE / 2) as f32,
+                                point.y - (SQUARE_SIZE / 2) as f32,
+                            );
+                            let square = self.get_square(x as u32, y as u32);
+                            state.drag_from_square = Some(square);
+                            if let Some(piece) = self.position.board().piece_at(square) {
+                                state.dragging_piece = Some(piece);
+                                state.hovering_piece = None;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                mouse::Event::ButtonReleased(button) => match button {
+                    mouse::Button::Left => {
+                        state.dragging_piece = None;
+                        if let Some(point) = cursor.position_in(bounds) {
+                            let x = (point.x / SQUARE_SIZE as f32).floor();
+                            let y = (point.y / SQUARE_SIZE as f32).floor();
+                            state.drag_top_left = Point::new(
+                                point.x - (SQUARE_SIZE / 2) as f32,
+                                point.y - (SQUARE_SIZE / 2) as f32,
+                            );
+                            let square = self.get_square(x as u32, y as u32);
+                            state.drag_to_square = Some(square);
+                            if let Some(piece) = self.position.board().piece_at(square) {
+                                state.hovering_piece = Some(piece);
+                            } else {
+                                state.hovering_piece = None;
+                            }
+
+                            if let Some(from_square) = state.drag_from_square {
+                                if let Some(to_square) = state.drag_to_square {
+                                    // send chess move message
+                                    return Some(Action::publish(Message::ChessMove([
+                                        from_square,
+                                        to_square,
+                                    ])));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
+            _ => {}
+        }
+
+        None
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> iced::mouse::Interaction {
+        // change cursor when hovering over piece
+        if state.dragging_piece.is_some() {
+            return iced::mouse::Interaction::Grabbing;
+        }
+        if state.hovering_piece.is_some() {
+            return iced::mouse::Interaction::Grab;
+        }
+        iced::mouse::Interaction::default()
+    }
 
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -256,23 +467,14 @@ impl<Message> canvas::Program<Message> for Game {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        // validate last move
         let light_last_move_color = iced::Color::from_rgb8(180, 185, 190);
         let dark_last_move_color = iced::Color::from_rgb8(145, 150, 155);
+
+        let square_size = Size::from([SQUARE_SIZE as f32, SQUARE_SIZE as f32]);
 
         let mut color;
         for file in 0..8 {
             for rank in 0..8 {
-                // let square = match self.orientation {
-                //     LichessColor::White => chess::Square::make_square(
-                //         chess::Rank::from_index(7 - rank),
-                //         chess::File::from_index(file),
-                //     ),
-                //     LichessColor::Black => chess::Square::make_square(
-                //         chess::Rank::from_index(rank),
-                //         chess::File::from_index(7 - file),
-                //     ),
-                // };
                 let square = match self.orientation {
                     LichessColor::White => shakmaty::Square::from_coords(
                         shakmaty::File::new(file),
@@ -292,8 +494,7 @@ impl<Message> canvas::Program<Message> for Game {
                 }
 
                 let top_left = Point::new((file * SQUARE_SIZE) as f32, (rank * SQUARE_SIZE) as f32);
-                let size = Size::from([SQUARE_SIZE as f32, SQUARE_SIZE as f32]);
-                let rect = canvas::Path::rectangle(top_left, size);
+                let rect = canvas::Path::rectangle(top_left, square_size);
 
                 // last move highlight
                 if let Some(s) = self.last_move_source {
@@ -317,11 +518,25 @@ impl<Message> canvas::Program<Message> for Game {
 
                 frame.fill(&rect, color);
 
+                // prevent drawing duplicate piece while dragging
+                if state.dragging_piece.is_some()
+                    && let Some(from_square) = state.drag_from_square
+                {
+                    if from_square == square {
+                        continue;
+                    }
+                }
                 if let Some(piece) = self.position.board().piece_at(square) {
                     let svg = piece_to_svg(piece);
-                    frame.draw_svg(Rectangle::new(top_left, size), svg);
+                    frame.draw_svg(Rectangle::new(top_left, square_size), svg);
                 }
             }
+        }
+
+        // draw dragged piece
+        if let Some(piece) = state.dragging_piece {
+            let svg = piece_to_svg(piece);
+            frame.draw_svg(Rectangle::new(state.drag_top_left, square_size), svg);
         }
 
         vec![frame.into_geometry()]
@@ -350,3 +565,17 @@ fn seconds_to_clock(total_seconds: i32) -> String {
     let seconds = total_seconds % 60;
     format!("{:02}:{:02}", minutes, seconds)
 }
+
+// use shakmaty::{Chess, Move, Square};
+//
+// fn make_drag_drop_move(pos: Chess, from: Square, to: Square) -> Option<Chess> {
+//     let legal_move = pos.legal_moves().into_iter().find(|m| match m {
+//         Move::Normal { from: f, to: t, .. } => *f == from && *t == to,
+//         Move::Castle { king, rook, .. } => *king == from && *rook == to,
+//         Move::EnPassant { from: f, to: t, .. } => *f == from && *t == to,
+//         Move::Put { .. } => false,
+//     })?;
+//
+//     // 4. Play move
+//     pos.play(legal_move).ok()
+// }
