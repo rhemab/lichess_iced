@@ -16,6 +16,8 @@ use iced::{Alignment, Point, Rectangle, Renderer, Size, Subscription, Theme, mou
 
 use std::str::FromStr;
 
+mod auth;
+
 const MOVE_SOUND: &[u8] = include_bytes!("../assets/sounds/Move.ogg");
 const CAPTURE_SOUND: &[u8] = include_bytes!("../assets/sounds/Capture.ogg");
 
@@ -73,6 +75,7 @@ enum Screen {
 #[derive(Clone)]
 enum Message {
     Connected(mpsc::Sender<ConnInput>),
+    Authenticated(LichessToken),
     TvEvent(LichessTvFeedEvent),
     Tick(iced::time::Instant),
     Menu,
@@ -85,7 +88,9 @@ enum Message {
 #[derive(Debug)]
 enum ConnInput {
     Menu,
+    Login,
     Watch,
+    Play,
 }
 
 fn main() -> iced::Result {
@@ -116,28 +121,34 @@ impl App {
             Message::Connected(tx) => {
                 self.conn_tx = Some(tx);
             }
+            Message::Authenticated(LichessToken) => {
+                self.lichess_token = Some(LichessToken);
+            }
             Message::Menu => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    if let Err(e) = tx.try_send(ConnInput::Menu) {
-                        eprintln!("{e}");
-                    }
+                    let _ = tx.try_send(ConnInput::Menu);
                 }
                 self.screen = Screen::Menu;
             }
+            Message::Login => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::Login);
+                }
+            }
             Message::Watch => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    if let Err(e) = tx.try_send(ConnInput::Watch) {
-                        eprintln!("{e}");
-                    }
+                    let _ = tx.try_send(ConnInput::Watch);
                 }
                 self.screen = Screen::Watch(Game::default());
             }
             Message::Play => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::Play);
+                }
                 let mut game = Game::default();
                 game.interactive = true;
                 self.screen = Screen::Play(game);
             }
-            Message::Login => {}
             Message::Tick(_) => match self.screen {
                 Screen::Watch(ref mut game) => game.tick_clock(),
                 Screen::Play(ref mut game) => game.tick_clock(),
@@ -361,7 +372,7 @@ impl App {
 
 fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
     iced::stream::channel(100, async |mut output| {
-        let client = LichessClient::new();
+        let mut client = LichessClient::new();
 
         let (sender, mut receiver) = mpsc::channel(100);
         let _ = output.send(Message::Connected(sender)).await;
@@ -374,6 +385,29 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
             let input = receiver.select_next_some().await;
 
             match input {
+                ConnInput::Login => {
+                    let client_id = std::env::var("LICHESS_CLIENT_ID")
+                        .unwrap_or_else(|_| crate::auth::DEFAULT_CLIENT_ID.to_owned());
+
+                    // An unauthenticated client is enough to build the authorization URL.
+                    if let Some(token) = crate::auth::run_login(&client, &client_id).await.ok() {
+                        let _ = output.send(Message::Authenticated(token.clone())).await;
+                        // Re-build the client, this time carrying the bearer token.
+                        if let Ok(c) = LichessClient::builder()
+                            .token(token.access_token.into_inner())
+                            .build()
+                        {
+                            client = c;
+                        }
+                    }
+
+                    if let Ok(me) = client.account().profile().await {
+                        println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
+                        crate::auth::show_recent_games(&client, &me.user.username).await;
+                        crate::auth::show_recent_puzzles(&client).await;
+                        crate::auth::show_studies(&client, &me.user.username).await;
+                    }
+                }
                 ConnInput::Watch => {
                     if let Ok(mut feed) = client.tv().feed().await {
                         // spawn new task for tv feed
@@ -384,6 +418,9 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                             }
                         }));
                     }
+                }
+                ConnInput::Play => {
+                    if let Ok(lichess_game) = client::challenges().challenge_ai().send().await {}
                 }
                 _ => {
                     if let Some(task) = watch_task.take() {
