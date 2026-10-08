@@ -1,4 +1,5 @@
 use litchee::LichessClient;
+use litchee::api::auth::oauth::LichessToken;
 use litchee::api::broadcasting::tv::{LichessTvFeedEvent, LichessTvFeedPlayer};
 use litchee::model::LichessColor;
 
@@ -6,9 +7,10 @@ use shakmaty::Position;
 
 use rodio::{Decoder, MixerDeviceSink};
 
-use iced::advanced::svg::{Handle, Svg};
+use iced::futures::channel::mpsc;
 use iced::futures::sink::SinkExt;
-use iced::futures::stream::StreamExt;
+
+use iced::advanced::svg::{Handle, Svg};
 use iced::widget::{Action, button, canvas, center, column, container, row, space, text};
 use iced::{Alignment, Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
 
@@ -43,6 +45,8 @@ struct App {
     screen: Screen,
     _sink_handle: MixerDeviceSink,
     audio_player: rodio::Player,
+    lichess_token: Option<LichessToken>,
+    conn_tx: Option<mpsc::Sender<ConnInput>>,
 }
 
 #[derive(Default)]
@@ -68,12 +72,20 @@ enum Screen {
 #[allow(dead_code)]
 #[derive(Clone)]
 enum Message {
+    Connected(mpsc::Sender<ConnInput>),
     TvEvent(LichessTvFeedEvent),
     Tick(iced::time::Instant),
     Menu,
     Watch,
     Play,
+    Login,
     ChessMove([shakmaty::Square; 2]),
+}
+
+#[derive(Debug)]
+enum ConnInput {
+    Menu,
+    Watch,
 }
 
 fn main() -> iced::Result {
@@ -94,18 +106,38 @@ impl App {
             screen: Screen::Menu,
             _sink_handle: sink_handle,
             audio_player,
+            lichess_token: None,
+            conn_tx: None,
         }
     }
 
     fn update(&mut self, message: Message) {
         match message {
-            Message::Menu => self.screen = Screen::Menu,
-            Message::Watch => self.screen = Screen::Watch(Game::default()),
+            Message::Connected(tx) => {
+                self.conn_tx = Some(tx);
+            }
+            Message::Menu => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    if let Err(e) = tx.try_send(ConnInput::Menu) {
+                        eprintln!("{e}");
+                    }
+                }
+                self.screen = Screen::Menu;
+            }
+            Message::Watch => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    if let Err(e) = tx.try_send(ConnInput::Watch) {
+                        eprintln!("{e}");
+                    }
+                }
+                self.screen = Screen::Watch(Game::default());
+            }
             Message::Play => {
                 let mut game = Game::default();
                 game.interactive = true;
                 self.screen = Screen::Play(game);
             }
+            Message::Login => {}
             Message::Tick(_) => match self.screen {
                 Screen::Watch(ref mut game) => game.tick_clock(),
                 Screen::Play(ref mut game) => game.tick_clock(),
@@ -199,16 +231,24 @@ impl App {
 
     fn view(&self) -> iced::Element<'_, Message> {
         match &self.screen {
-            Screen::Menu => center(
-                column![
-                    text("Lichess Iced").size(80),
-                    button("Play").on_press(Message::Play),
-                    button("Watch").on_press(Message::Watch),
-                ]
-                .spacing(20)
-                .align_x(Alignment::Center),
-            )
-            .into(),
+            Screen::Menu => {
+                let play_button = if self.lichess_token.is_some() {
+                    button("Play").on_press(Message::Play)
+                } else {
+                    button("Login").on_press(Message::Login)
+                };
+                center(
+                    column![
+                        text("Lichess Iced").size(80),
+                        space().height(20),
+                        play_button,
+                        button("Watch").on_press(Message::Watch),
+                    ]
+                    .spacing(20)
+                    .align_x(Alignment::Center),
+                )
+                .into()
+            }
             Screen::Watch(game) => {
                 let mut top_player = String::new();
                 let mut top_player_time = String::new();
@@ -312,23 +352,44 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        match self.screen {
-            Screen::Watch(_) => Subscription::batch([
-                Subscription::run(lichess_tv),
-                iced::time::every(iced::time::Duration::from_secs(1)).map(Message::Tick),
-            ]),
-            Screen::Play(_) => Subscription::none(),
-            _ => Subscription::none(),
-        }
+        Subscription::batch([
+            Subscription::run(lichess_conn),
+            iced::time::every(iced::time::Duration::from_secs(1)).map(Message::Tick),
+        ])
     }
 }
 
-fn lichess_tv() -> impl iced::futures::Stream<Item = Message> {
+fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
     iced::stream::channel(100, async |mut output| {
         let client = LichessClient::new();
-        if let Ok(mut feed) = client.tv().feed().await {
-            while let Some(Ok(event)) = feed.next().await {
-                let _ = output.send(Message::TvEvent(event)).await;
+
+        let (sender, mut receiver) = mpsc::channel(100);
+        let _ = output.send(Message::Connected(sender)).await;
+
+        let mut watch_task = None;
+
+        loop {
+            use iced_futures::futures::StreamExt;
+
+            let input = receiver.select_next_some().await;
+
+            match input {
+                ConnInput::Watch => {
+                    if let Ok(mut feed) = client.tv().feed().await {
+                        // spawn new task for tv feed
+                        let mut out_clone = output.clone();
+                        watch_task = Some(tokio::spawn(async move {
+                            while let Some(Ok(event)) = feed.next().await {
+                                let _ = out_clone.send(Message::TvEvent(event)).await;
+                            }
+                        }));
+                    }
+                }
+                _ => {
+                    if let Some(task) = watch_task.take() {
+                        task.abort();
+                    }
+                }
             }
         }
     })
