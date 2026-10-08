@@ -10,7 +10,7 @@ use iced::advanced::svg::{Handle, Svg};
 use iced::futures::sink::SinkExt;
 use iced::futures::stream::StreamExt;
 use iced::widget::{Action, button, canvas, center, column, container, row, space, text};
-use iced::{Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
+use iced::{Alignment, Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
 
 use std::str::FromStr;
 
@@ -47,6 +47,7 @@ struct App {
 
 #[derive(Default)]
 struct Game {
+    interactive: bool,
     fen: String,
     position: shakmaty::Chess,
     last_move: String,
@@ -59,6 +60,7 @@ struct Game {
 }
 
 enum Screen {
+    Menu,
     Watch(Game),
     Play(Game),
 }
@@ -68,6 +70,7 @@ enum Screen {
 enum Message {
     TvEvent(LichessTvFeedEvent),
     Tick(iced::time::Instant),
+    Menu,
     Watch,
     Play,
     ChessMove([shakmaty::Square; 2]),
@@ -88,7 +91,7 @@ impl App {
         let audio_player = rodio::Player::connect_new(&sink_handle.mixer());
 
         App {
-            screen: Screen::Play(Game::default()),
+            screen: Screen::Menu,
             _sink_handle: sink_handle,
             audio_player,
         }
@@ -96,11 +99,17 @@ impl App {
 
     fn update(&mut self, message: Message) {
         match message {
+            Message::Menu => self.screen = Screen::Menu,
             Message::Watch => self.screen = Screen::Watch(Game::default()),
-            Message::Play => self.screen = Screen::Play(Game::default()),
+            Message::Play => {
+                let mut game = Game::default();
+                game.interactive = true;
+                self.screen = Screen::Play(game);
+            }
             Message::Tick(_) => match self.screen {
                 Screen::Watch(ref mut game) => game.tick_clock(),
                 Screen::Play(ref mut game) => game.tick_clock(),
+                _ => {}
             },
             Message::ChessMove([from_square, to_square]) => match self.screen {
                 Screen::Play(ref mut game) => {
@@ -190,6 +199,16 @@ impl App {
 
     fn view(&self) -> iced::Element<'_, Message> {
         match &self.screen {
+            Screen::Menu => center(
+                column![
+                    text("Lichess Iced").size(80),
+                    button("Play").on_press(Message::Play),
+                    button("Watch").on_press(Message::Watch),
+                ]
+                .spacing(20)
+                .align_x(Alignment::Center),
+            )
+            .into(),
             Screen::Watch(game) => {
                 let mut top_player = String::new();
                 let mut top_player_time = String::new();
@@ -218,7 +237,7 @@ impl App {
                     }
                 }
                 center(column![
-                    container(row![button("Play").on_press(Message::Play)])
+                    container(row![button("Menu").on_press(Message::Menu)])
                         .width(640)
                         .padding(5),
                     container(row![
@@ -268,7 +287,7 @@ impl App {
                 }
 
                 center(column![
-                    container(row![button("Watch").on_press(Message::Watch)])
+                    container(row![button("Menu").on_press(Message::Menu)])
                         .width(640)
                         .padding(5),
                     container(row![
@@ -299,6 +318,7 @@ impl App {
                 iced::time::every(iced::time::Duration::from_secs(1)).map(Message::Tick),
             ]),
             Screen::Play(_) => Subscription::none(),
+            _ => Subscription::none(),
         }
     }
 }
@@ -361,6 +381,9 @@ impl canvas::Program<Message> for Game {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
+        if !self.interactive {
+            return None;
+        }
         match event {
             iced::Event::Mouse(mouse_event) => match mouse_event {
                 mouse::Event::CursorMoved { position: _ } => {
@@ -565,17 +588,3 @@ fn seconds_to_clock(total_seconds: i32) -> String {
     let seconds = total_seconds % 60;
     format!("{:02}:{:02}", minutes, seconds)
 }
-
-// use shakmaty::{Chess, Move, Square};
-//
-// fn make_drag_drop_move(pos: Chess, from: Square, to: Square) -> Option<Chess> {
-//     let legal_move = pos.legal_moves().into_iter().find(|m| match m {
-//         Move::Normal { from: f, to: t, .. } => *f == from && *t == to,
-//         Move::Castle { king, rook, .. } => *king == from && *rook == to,
-//         Move::EnPassant { from: f, to: t, .. } => *f == from && *t == to,
-//         Move::Put { .. } => false,
-//     })?;
-//
-//     // 4. Play move
-//     pos.play(legal_move).ok()
-// }
