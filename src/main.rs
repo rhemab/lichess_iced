@@ -121,8 +121,8 @@ impl App {
             Message::Connected(tx) => {
                 self.conn_tx = Some(tx);
             }
-            Message::Authenticated(LichessToken) => {
-                self.lichess_token = Some(LichessToken);
+            Message::Authenticated(lichess_token) => {
+                self.lichess_token = Some(lichess_token);
             }
             Message::Menu => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -403,9 +403,9 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 
                     if let Ok(me) = client.account().profile().await {
                         println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
-                        crate::auth::show_recent_games(&client, &me.user.username).await;
-                        crate::auth::show_recent_puzzles(&client).await;
-                        crate::auth::show_studies(&client, &me.user.username).await;
+                        let _ = crate::auth::show_recent_games(&client, &me.user.username).await;
+                        let _ = crate::auth::show_recent_puzzles(&client).await;
+                        let _ = crate::auth::show_studies(&client, &me.user.username).await;
                     }
                 }
                 ConnInput::Watch => {
@@ -420,7 +420,11 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     }
                 }
                 ConnInput::Play => {
-                    if let Ok(lichess_game) = client::challenges().challenge_ai().send().await {}
+                    if let Ok(lichess_game) = client.challenges().challenge_ai(1).send().await {
+                        let game_id = lichess_game.id;
+                        let _ = client.board().stream_game(&game_id).await;
+                        // client.board.make_move(game_id, chess_move);
+                    }
                 }
                 _ => {
                     if let Some(task) = watch_task.take() {
