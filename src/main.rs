@@ -91,6 +91,7 @@ enum Message {
     Menu,
     Watch,
     Play,
+    PlayAi,
     Login,
     Logout,
     ChessMove([shakmaty::Square; 2]),
@@ -104,6 +105,7 @@ enum ConnInput {
     Login,
     Watch,
     Play,
+    PlayAi,
     ChessMove((String, String)),
 }
 
@@ -177,6 +179,14 @@ impl App {
                 game.interactive = true;
                 self.screen = Screen::Play(game);
             }
+            Message::PlayAi => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::PlayAi);
+                }
+                let mut game = Game::default();
+                game.interactive = true;
+                self.screen = Screen::Play(game);
+            }
             Message::BoardEvent(event) => {
                 println!("{:?}", event);
                 match self.screen {
@@ -194,6 +204,8 @@ impl App {
                                         game.orientation = LichessColor::White;
                                     }
                                     game.white_name = name;
+                                } else if let Some(ai_level) = white_player.ai_level {
+                                    game.white_name = format!("Stockfish {}", ai_level);
                                 }
                             }
                             if let Some(black_player) = game_full.black {
@@ -206,6 +218,8 @@ impl App {
                                         game.orientation = LichessColor::Black;
                                     }
                                     game.black_name = name;
+                                } else if let Some(ai_level) = black_player.ai_level {
+                                    game.black_name = format!("Stockfish {}", ai_level);
                                 }
                             }
                         }
@@ -357,21 +371,17 @@ impl App {
     fn view(&self) -> iced::Element<'_, Message> {
         match &self.screen {
             Screen::Menu => {
-                let play_button = if self.lichess_token.is_some() {
-                    button("Play").on_press(Message::Play)
-                } else {
-                    button("Login").on_press(Message::Login)
-                };
-                let mut content = column![
-                    text("Lichess Iced").size(80),
-                    space().height(20),
-                    play_button,
-                    button("Watch").on_press(Message::Watch),
-                ];
+                let mut col = column![text("Lichess Iced").size(80), space().height(20),];
                 if self.lichess_token.is_some() {
-                    content = content.push(button("Logout").on_press(Message::Logout));
-                }
-                center(content.spacing(20).align_x(Alignment::Center)).into()
+                    col = col.push(button("Play").on_press(Message::Play));
+                    col = col.push(button("Play Ai").on_press(Message::PlayAi));
+                    col = col.push(button("Watch").on_press(Message::Watch));
+                    col = col.push(button("Logout").on_press(Message::Logout));
+                } else {
+                    col = col.push(button("Login").on_press(Message::Login));
+                    col = col.push(button("Watch").on_press(Message::Watch));
+                };
+                center(col.spacing(20).align_x(Alignment::Center)).into()
             }
             Screen::Watch(game) => {
                 let mut top_player = String::new();
@@ -423,22 +433,38 @@ impl App {
                 .into()
             }
             Screen::Play(game) => {
-                let mut top_player = String::new();
-                let mut top_player_time = String::new();
-                let mut bottom_player = String::new();
-                let mut bottom_player_time = String::new();
+                let top_player;
+                let top_player_time;
+                let bottom_player;
+                let bottom_player_time;
 
                 match game.orientation {
                     LichessColor::White => {
-                        top_player = format!("{} ({})", game.black_name, game.black_rating);
+                        top_player = if game.black_rating > 0 {
+                            format!("{} ({})", game.black_name, game.black_rating)
+                        } else {
+                            format!("{}", game.black_name)
+                        };
                         top_player_time = milliseconds_to_clock(game.black_clock);
-                        bottom_player = format!("{} ({})", game.white_name, game.white_rating);
+                        bottom_player = if game.white_rating > 0 {
+                            format!("{} ({})", game.white_name, game.white_rating)
+                        } else {
+                            format!("{}", game.white_name)
+                        };
                         bottom_player_time = milliseconds_to_clock(game.white_clock);
                     }
                     LichessColor::Black => {
-                        top_player = format!("{} ({})", game.white_name, game.white_rating);
+                        top_player = if game.white_rating > 0 {
+                            format!("{} ({})", game.white_name, game.white_rating)
+                        } else {
+                            format!("{}", game.white_name)
+                        };
                         top_player_time = milliseconds_to_clock(game.white_clock);
-                        bottom_player = format!("{} ({})", game.black_name, game.black_rating);
+                        bottom_player = if game.black_rating > 0 {
+                            format!("{} ({})", game.black_name, game.black_rating)
+                        } else {
+                            format!("{}", game.black_name)
+                        };
                         bottom_player_time = milliseconds_to_clock(game.black_clock);
                     }
                 }
@@ -531,6 +557,12 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                 ConnInput::Token(secret) => {
                     if let Ok(c) = LichessClient::builder().token(secret).build() {
                         client = c;
+                        if let Ok(me) = client.account().profile().await {
+                            let _ = output
+                                .send(Message::SetUsername(me.user.username.clone()))
+                                .await;
+                            println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
+                        }
                     }
                 }
                 ConnInput::Login => {
@@ -569,12 +601,77 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     }
                 }
                 ConnInput::Play => {
-                    if let Ok(me) = client.account().profile().await {
-                        let _ = output
-                            .send(Message::SetUsername(me.user.username.clone()))
-                            .await;
-                        println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
-                    }
+                    let mut out_clone = output.clone();
+                    let client_clone = client.clone();
+                    feed_task = Some(tokio::spawn(async move {
+                        // Listen for newly created games via incoming events
+                        if let Ok(mut events) = client_clone.board().stream_events().await {
+                            while let Some(item) = events.next().await {
+                                match item {
+                                    Ok(LichessIncomingEvent::GameStart { game }) => {
+                                        if let Some(id) = game.id {
+                                            // stream game moves
+                                            match client_clone.board().stream_game(&id).await {
+                                                Ok(mut feed) => {
+                                                    while let Some(res) = feed.next().await {
+                                                        match res {
+                                                            Ok(event) => {
+                                                                if let Err(e) = out_clone
+                                                                    .send(Message::BoardEvent(
+                                                                        event,
+                                                                    ))
+                                                                    .await
+                                                                {
+                                                                    eprintln!("{:?}", e);
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                eprintln!(
+                                                                    "stream error: {:?}",
+                                                                    err
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("stread game failed: {:?}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        println!("item: {:?}", item);
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                    // seek opponent
+                    let client_clone2 = client.clone();
+                    tokio::spawn(async move {
+                        match client_clone2
+                            .board()
+                            .seek()
+                            .rated(false)
+                            .clock(5.0, 0)
+                            .send()
+                            .await
+                        {
+                            Ok(mut feed) => {
+                                while let Some(Ok(e)) = feed.next().await {
+                                    dbg!("seeking...");
+                                    dbg!(e);
+                                }
+                            }
+                            Err(err) => {
+                                dbg!(err.to_string());
+                            }
+                        }
+                        dbg!("seek finished");
+                    });
+                }
+                ConnInput::PlayAi => {
                     let mut out_clone = output.clone();
                     let client_clone = client.clone();
                     feed_task = Some(tokio::spawn(async move {
@@ -724,8 +821,17 @@ impl canvas::Program<Message> for Game {
                             let square = self.get_square(x as u32, y as u32);
                             state.drag_from_square = Some(square);
                             if let Some(piece) = self.position.board().piece_at(square) {
-                                state.dragging_piece = Some(piece);
-                                state.hovering_piece = None;
+                                match (piece.color, self.orientation) {
+                                    (shakmaty::Color::White, LichessColor::White) => {
+                                        state.dragging_piece = Some(piece);
+                                        state.hovering_piece = None;
+                                    }
+                                    (shakmaty::Color::Black, LichessColor::Black) => {
+                                        state.dragging_piece = Some(piece);
+                                        state.hovering_piece = None;
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -733,29 +839,31 @@ impl canvas::Program<Message> for Game {
                 },
                 mouse::Event::ButtonReleased(button) => match button {
                     mouse::Button::Left => {
-                        state.dragging_piece = None;
-                        if let Some(point) = cursor.position_in(bounds) {
-                            let x = (point.x / SQUARE_SIZE as f32).floor();
-                            let y = (point.y / SQUARE_SIZE as f32).floor();
-                            state.drag_top_left = Point::new(
-                                point.x - (SQUARE_SIZE / 2) as f32,
-                                point.y - (SQUARE_SIZE / 2) as f32,
-                            );
-                            let square = self.get_square(x as u32, y as u32);
-                            state.drag_to_square = Some(square);
-                            if let Some(piece) = self.position.board().piece_at(square) {
-                                state.hovering_piece = Some(piece);
-                            } else {
-                                state.hovering_piece = None;
-                            }
+                        if state.dragging_piece.is_some() {
+                            state.dragging_piece = None;
+                            if let Some(point) = cursor.position_in(bounds) {
+                                let x = (point.x / SQUARE_SIZE as f32).floor();
+                                let y = (point.y / SQUARE_SIZE as f32).floor();
+                                state.drag_top_left = Point::new(
+                                    point.x - (SQUARE_SIZE / 2) as f32,
+                                    point.y - (SQUARE_SIZE / 2) as f32,
+                                );
+                                let square = self.get_square(x as u32, y as u32);
+                                state.drag_to_square = Some(square);
+                                if let Some(piece) = self.position.board().piece_at(square) {
+                                    state.hovering_piece = Some(piece);
+                                } else {
+                                    state.hovering_piece = None;
+                                }
 
-                            if let Some(from_square) = state.drag_from_square {
-                                if let Some(to_square) = state.drag_to_square {
-                                    // send chess move message
-                                    return Some(Action::publish(Message::ChessMove([
-                                        from_square,
-                                        to_square,
-                                    ])));
+                                if let Some(from_square) = state.drag_from_square {
+                                    if let Some(to_square) = state.drag_to_square {
+                                        // send chess move message
+                                        return Some(Action::publish(Message::ChessMove([
+                                            from_square,
+                                            to_square,
+                                        ])));
+                                    }
                                 }
                             }
                         }
