@@ -17,7 +17,6 @@
 
 use std::error::Error;
 
-use iced_futures::futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
@@ -188,80 +187,5 @@ async fn write_http_response(stream: &mut TcpStream, body: &str) -> Result<(), B
     );
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
-    Ok(())
-}
-
-/// Prints the 10 most recently played games for `username`.
-pub async fn show_recent_games(
-    client: &LichessClient,
-    username: &str,
-) -> Result<(), Box<dyn Error>> {
-    println!("── 10 most recent games ──");
-    let mut games = client
-        .games()
-        .export_user(username)
-        .max(10)
-        .stream()
-        .await?;
-    let mut count = 0;
-    while let Some(game) = games.next().await {
-        let game = game?;
-        let speed = game
-            .speed
-            .map_or_else(|| "?".to_owned(), |s| format!("{s:?}"));
-        let winner = game
-            .winner
-            .map_or_else(|| "draw/ongoing".to_owned(), |c| format!("{c:?}"));
-        println!("  {} [{speed}] winner: {winner}", game.id);
-        count += 1;
-    }
-    if count == 0 {
-        println!("  (no games found)");
-    }
-    println!();
-    Ok(())
-}
-
-/// Prints the 10 most recent puzzle attempts (requires `puzzle:read`).
-pub async fn show_recent_puzzles(client: &LichessClient) -> Result<(), Box<dyn Error>> {
-    println!("── 10 most recent puzzle attempts ──");
-    let mut activity = client.puzzles().activity(Some(10), None, None).await?;
-    let mut count = 0;
-    while let Some(entry) = activity.next().await {
-        let entry = entry?;
-        let result = if entry.win {
-            "✔ solved"
-        } else {
-            "✘ failed"
-        };
-        let rating = entry
-            .puzzle
-            .rating
-            .map_or_else(|| "?".to_owned(), |r| r.to_string());
-        println!("  {} (rating {rating}) — {result}", entry.puzzle.id);
-        count += 1;
-    }
-    if count == 0 {
-        println!("  (no puzzle activity found)");
-    }
-    println!();
-    Ok(())
-}
-
-/// Prints the studies the user owns or contributes to (requires `study:read`
-/// to include private studies).
-pub async fn show_studies(client: &LichessClient, username: &str) -> Result<(), Box<dyn Error>> {
-    println!("── studies you own or take part in ──");
-    let mut studies = client.studies().list_metadata(username).await?;
-    let mut count = 0;
-    while let Some(study) = studies.next().await {
-        let study = study?;
-        println!("  {} — {}", study.id, study.name);
-        count += 1;
-    }
-    if count == 0 {
-        println!("  (no studies found)");
-    }
-    println!();
     Ok(())
 }

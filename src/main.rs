@@ -1,6 +1,7 @@
 use litchee::LichessClient;
 use litchee::api::broadcasting::tv::{LichessTvFeedEvent, LichessTvFeedPlayer};
 use litchee::api::gameplay::board::{LichessBoardEvent, LichessIncomingEvent};
+use litchee::api::gameplay::challenges::LichessChallenge;
 use litchee::api::gameplay::games::LichessGameStatusName;
 use litchee::model::{LichessColor, LichessUser};
 
@@ -12,7 +13,9 @@ use iced::futures::channel::mpsc;
 use iced::futures::sink::SinkExt;
 
 use iced::advanced::svg::{Handle, Svg};
-use iced::widget::{Action, button, canvas, center, column, container, grid, row, space, text};
+use iced::widget::{
+    Action, button, canvas, center, column, container, grid, opaque, row, space, stack, text,
+};
 use iced::{Alignment, Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
 
 use std::str::FromStr;
@@ -51,6 +54,7 @@ struct App {
     audio_player: rodio::Player,
     lichess_token: Option<String>,
     conn_tx: Option<mpsc::Sender<ConnInput>>,
+    challenges: Vec<LichessChallenge>,
 }
 
 #[derive(Default)]
@@ -102,6 +106,7 @@ enum Message {
     Logout,
     ChessMove([shakmaty::Square; 2]),
     BoardEvent(LichessBoardEvent),
+    AllIncomingChallenges(Vec<LichessChallenge>),
 }
 
 #[derive(Debug)]
@@ -138,6 +143,7 @@ impl App {
             audio_player,
             lichess_token: load_token(),
             conn_tx: None,
+            challenges: vec![],
         }
     }
 
@@ -193,6 +199,9 @@ impl App {
             },
             Message::ChallengeFriend(username) => {
                 self.screen = Screen::ChallengeFriend(username);
+            }
+            Message::AllIncomingChallenges(challenges) => {
+                self.challenges = challenges;
             }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -310,8 +319,8 @@ impl App {
                 }
             }
             Message::Tick(_) => match self.screen {
-                Screen::Watch(ref mut game) => game.tick_clock(),
-                Screen::Play(ref mut game) => game.tick_clock(),
+                Screen::Watch(ref mut game) => game.tick_clock(1),
+                Screen::Play(ref mut game) => game.tick_clock(1000),
                 _ => {}
             },
             Message::ChessMove([from_square, to_square]) => match self.screen {
@@ -421,7 +430,26 @@ impl App {
                     col = col.push(button("Login").on_press(Message::Login));
                     col = col.push(button("Watch").on_press(Message::Watch));
                 };
-                center(col.spacing(20).align_x(Alignment::Center)).into()
+
+                let mut top_row = row![text(&self.username), space().width(iced::Length::Fill),];
+                if let Some(challenge) = &self.challenges.last() {
+                    if let Some(challenger) = &challenge.challenger {
+                        top_row = top_row
+                            .push(row![
+                                text(format!("Challenge from: {}", challenger.name)),
+                                button("Accept").style(button::success),
+                                button("Decline").style(button::danger),
+                            ])
+                            .align_y(Alignment::Center)
+                            .spacing(5);
+                    }
+                }
+
+                column![
+                    top_row.align_y(Alignment::Center).spacing(5).padding(10),
+                    center(col.spacing(20).align_x(Alignment::Center)),
+                ]
+                .into()
             }
             Screen::Friends(lichess_users) => {
                 let mut col = column![];
@@ -591,7 +619,7 @@ impl App {
                     }
                 }
 
-                let mut col = column![
+                let col = column![
                     container(row![
                         text(top_player),
                         space::horizontal(),
@@ -609,47 +637,69 @@ impl App {
                     .padding(5),
                 ];
 
+                let mut alert_col = column![];
+
                 if let Some(winner) = game.winner {
-                    col = col.push(text(format!("{:?} is victorious!", winner)));
+                    alert_col = alert_col.push(text(format!("{:?} is victorious!", winner)));
                 }
-                if let Some(status) = game.status {
-                    match status {
-                        LichessGameStatusName::Aborted => {
-                            col = col.push(text("Aborted"));
-                        }
-                        LichessGameStatusName::Draw => {
-                            col = col.push(text("Draw"));
-                        }
-                        LichessGameStatusName::InsufficientMaterialClaim => {
-                            col = col.push(text("Insufficient Material"));
-                        }
-                        LichessGameStatusName::Mate => {
-                            col = col.push(text("Checkmate"));
-                        }
-                        LichessGameStatusName::NoStart => {
-                            col = col.push(text("No Start"));
-                        }
-                        LichessGameStatusName::Outoftime => {
-                            col = col.push(text("Out of time"));
-                        }
-                        LichessGameStatusName::Resign => {
-                            col = col.push(text("Resign"));
-                        }
-                        LichessGameStatusName::Stalemate => {
-                            col = col.push(text("Stalemate"));
-                        }
-                        LichessGameStatusName::Timeout => {
-                            col = col.push(text("Out of time"));
-                        }
-                        _ => {}
+                let mut game_over = true;
+                match game.status {
+                    Some(LichessGameStatusName::Aborted) => {
+                        alert_col = alert_col.push(text("Aborted"));
                     }
+                    Some(LichessGameStatusName::Draw) => {
+                        alert_col = alert_col.push(text("Draw"));
+                    }
+                    Some(LichessGameStatusName::InsufficientMaterialClaim) => {
+                        alert_col = alert_col.push(text("Insufficient Material"));
+                    }
+                    Some(LichessGameStatusName::Mate) => {
+                        alert_col = alert_col.push(text("Checkmate"));
+                    }
+                    Some(LichessGameStatusName::NoStart) => {
+                        alert_col = alert_col.push(text("No Start"));
+                    }
+                    Some(LichessGameStatusName::Outoftime) => {
+                        alert_col = alert_col.push(text("Out of time"));
+                    }
+                    Some(LichessGameStatusName::Resign) => {
+                        alert_col = alert_col.push(text("Resign"));
+                    }
+                    Some(LichessGameStatusName::Stalemate) => {
+                        alert_col = alert_col.push(text("Stalemate"));
+                    }
+                    Some(LichessGameStatusName::Timeout) => {
+                        alert_col = alert_col.push(text("Out of time"));
+                    }
+                    Some(LichessGameStatusName::Created)
+                    | Some(LichessGameStatusName::Started)
+                    | None => {
+                        game_over = false;
+                    }
+                    _ => {}
                 }
 
-                column![
-                    row![button("Back").on_press(Message::Menu)].padding(10),
-                    center(col),
-                ]
-                .into()
+                if game_over {
+                    let alert = opaque(
+                        container(alert_col.spacing(20))
+                            .padding(20)
+                            .style(container::rounded_box),
+                    );
+                    stack![
+                        column![
+                            row![button("Back").on_press(Message::Menu)].padding(10),
+                            center(col),
+                        ],
+                        center(alert)
+                    ]
+                    .into()
+                } else {
+                    column![
+                        row![button("Back").on_press(Message::Menu)].padding(10),
+                        center(col),
+                    ]
+                    .into()
+                }
             }
         }
     }
@@ -671,6 +721,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 
         let mut events_task = None;
         let mut tv_task = None;
+        let mut seek_task = None;
         let mut authenticated = false;
 
         loop {
@@ -681,6 +732,21 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                 let client_clone = client.clone();
                 let mut out_clone = output.clone();
                 events_task = Some(tokio::spawn(async move {
+                    // set username
+                    if let Ok(me) = client_clone.account().profile().await {
+                        let _ = out_clone
+                            .send(Message::SetUsername(me.user.username.clone()))
+                            .await;
+                    }
+
+                    // fetch challenges
+                    if let Ok(challenges) = client_clone.challenges().list().await {
+                        // send incoming challenges
+                        let _ = out_clone
+                            .send(Message::AllIncomingChallenges(challenges.incoming))
+                            .await;
+                    }
+
                     // Listen for newly created games via incoming events
                     if let Ok(mut events) = client_clone.board().stream_events().await {
                         while let Some(item) = events.next().await {
@@ -726,12 +792,6 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     if let Ok(c) = LichessClient::builder().token(secret).build() {
                         authenticated = true;
                         client = c;
-                        if let Ok(me) = client.account().profile().await {
-                            let _ = output
-                                .send(Message::SetUsername(me.user.username.clone()))
-                                .await;
-                            println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
-                        }
                     }
                 }
                 ConnInput::Login => {
@@ -748,16 +808,6 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                             client = c;
                         }
                     }
-
-                    if let Ok(me) = client.account().profile().await {
-                        let _ = output
-                            .send(Message::SetUsername(me.user.username.clone()))
-                            .await;
-                        println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
-                        let _ = crate::auth::show_recent_games(&client, &me.user.username).await;
-                        let _ = crate::auth::show_recent_puzzles(&client).await;
-                        let _ = crate::auth::show_studies(&client, &me.user.username).await;
-                    }
                 }
                 ConnInput::Watch => {
                     if let Ok(mut feed) = client.tv().feed().await {
@@ -773,14 +823,14 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                 ConnInput::Play((min, inc)) => {
                     // seek opponent
                     let client_clone = client.clone();
-                    tokio::spawn(async move {
+                    seek_task = Some(tokio::spawn(async move {
                         match client_clone.board().seek().clock(min, inc).send().await {
                             Ok(mut feed) => while let Some(Ok(_)) = feed.next().await {},
                             Err(err) => {
                                 dbg!(err.to_string());
                             }
                         }
-                    });
+                    }));
                 }
                 ConnInput::PlayFriend((min, inc, username)) => {
                     match client
@@ -809,6 +859,9 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     if let Some(task) = tv_task.take() {
                         task.abort();
                     }
+                    if let Some(task) = seek_task.take() {
+                        task.abort();
+                    }
                 }
                 ConnInput::FetchFriends => {
                     let mut out_clone = output.clone();
@@ -832,19 +885,24 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 }
 
 impl Game {
-    fn tick_clock(&mut self) {
-        match self.position.turn() {
-            shakmaty::Color::White => {
-                if self.white_clock > 0 {
-                    self.white_clock -= 1;
-                }
+    fn tick_clock(&mut self, increment: i64) {
+        match self.status {
+            Some(LichessGameStatusName::Started) => {
+                match self.position.turn() {
+                    shakmaty::Color::White => {
+                        if self.white_clock > 0 {
+                            self.white_clock -= increment;
+                        }
+                    }
+                    shakmaty::Color::Black => {
+                        if self.black_clock > 0 {
+                            self.black_clock -= increment;
+                        }
+                    }
+                };
             }
-            shakmaty::Color::Black => {
-                if self.black_clock > 0 {
-                    self.black_clock -= 1;
-                }
-            }
-        };
+            _ => {}
+        }
     }
 
     fn get_square(&self, x: u32, y: u32) -> shakmaty::Square {
