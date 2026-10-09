@@ -1,6 +1,7 @@
 use litchee::LichessClient;
 use litchee::api::broadcasting::tv::{LichessTvFeedEvent, LichessTvFeedPlayer};
 use litchee::api::gameplay::board::{LichessBoardEvent, LichessIncomingEvent};
+use litchee::api::gameplay::games::LichessGameStatusName;
 use litchee::model::LichessColor;
 
 use shakmaty::Position;
@@ -59,13 +60,18 @@ struct Game {
     interactive: bool,
     fen: String,
     position: shakmaty::Chess,
-    last_move: String,
-    last_move_source: Option<shakmaty::Square>,
-    last_move_dest: Option<shakmaty::Square>,
+    last_move_uci: String,
+    last_move: Option<shakmaty::Move>,
     white_clock: i64,
     black_clock: i64,
+    white_name: String,
+    black_name: String,
+    white_rating: u32,
+    black_rating: u32,
     orientation: LichessColor,
-    players: Vec<LichessTvFeedPlayer>,
+    tv_players: Vec<LichessTvFeedPlayer>,
+    status: Option<LichessGameStatusName>,
+    winner: Option<LichessColor>,
 }
 
 enum Screen {
@@ -177,29 +183,43 @@ impl App {
                     Screen::Play(ref mut game) => match event {
                         LichessBoardEvent::OpponentGone(_opponent_gone) => {}
                         LichessBoardEvent::GameFull(game_full) => {
-                            println!("{:?}", game_full);
                             game.id = game_full.id.clone();
+                            if let Some(white_player) = game_full.white {
+                                if let Some(rating) = white_player.rating {
+                                    game.white_rating = rating;
+                                }
+                                if let Some(name) = white_player.name {
+                                    if name == self.username {
+                                        // we are white
+                                        game.orientation = LichessColor::White;
+                                    }
+                                    game.white_name = name;
+                                }
+                            }
                             if let Some(black_player) = game_full.black {
+                                if let Some(rating) = black_player.rating {
+                                    game.black_rating = rating;
+                                }
                                 if let Some(name) = black_player.name {
                                     if name == self.username {
+                                        // we are black
                                         game.orientation = LichessColor::Black;
                                     }
+                                    game.black_name = name;
                                 }
                             }
                         }
                         LichessBoardEvent::GameState(game_state) => {
-                            println!("{:?}", game_state);
                             game.white_clock = game_state.wtime;
                             game.black_clock = game_state.btime;
-                            let moves: Vec<String> = game_state
-                                .moves
-                                .split_whitespace()
-                                .map(|s| s.to_string())
-                                .collect();
+                            game.status = Some(game_state.status);
+                            game.winner = game_state.winner;
+                            let moves: Vec<&str> = game_state.moves.split_whitespace().collect();
                             if moves.len() == game.history.len() + 1 {
                                 // make opponent's move
                                 if let Some(opponent_move) = moves.last() {
                                     game.history.push(opponent_move.to_string());
+                                    game.last_move_uci = opponent_move.to_string();
                                     if let Ok(uci) = opponent_move.parse::<shakmaty::uci::UciMove>()
                                     {
                                         if let Ok(legal_move) = uci.to_move(&game.position) {
@@ -222,6 +242,7 @@ impl App {
                                                 game.position.clone().play(legal_move)
                                             {
                                                 game.position = new_pos;
+                                                game.last_move = Some(legal_move);
                                             }
                                         }
                                     }
@@ -251,6 +272,7 @@ impl App {
             },
             Message::ChessMove([from_square, to_square]) => match self.screen {
                 Screen::Play(ref mut game) => {
+                    let mut sound = MOVE_SOUND;
                     let uci_move = shakmaty::uci::UciMove::Normal {
                         from: from_square,
                         to: to_square,
@@ -265,19 +287,17 @@ impl App {
                             )));
                         }
                         if legal_move.is_capture() {
-                            if let Ok(source) = Decoder::new(std::io::Cursor::new(CAPTURE_SOUND)) {
-                                self.audio_player.stop();
-                                self.audio_player.append(source);
-                            }
-                        } else {
-                            if let Ok(source) = Decoder::new(std::io::Cursor::new(MOVE_SOUND)) {
-                                self.audio_player.stop();
-                                self.audio_player.append(source);
-                            }
+                            sound = CAPTURE_SOUND;
+                        }
+                        if let Ok(source) = Decoder::new(std::io::Cursor::new(sound)) {
+                            self.audio_player.stop();
+                            self.audio_player.append(source);
                         }
                         if let Ok(new_pos) = game.position.clone().play(legal_move) {
                             game.position = new_pos;
                             game.history.push(uci_move.to_string());
+                            game.last_move_uci = uci_move.to_string();
+                            game.last_move = Some(legal_move);
                         }
                     }
                 }
@@ -290,12 +310,11 @@ impl App {
                         game.fen = data.fen;
                         game.white_clock = data.wc as i64;
                         game.black_clock = data.bc as i64;
-                        game.last_move = data.lm;
+                        game.last_move_uci = data.lm;
 
-                        if let Ok(uci) = game.last_move.parse::<shakmaty::uci::UciMove>() {
+                        if let Ok(uci) = game.last_move_uci.parse::<shakmaty::uci::UciMove>() {
                             if let Ok(chess_move) = uci.to_move(&game.position) {
-                                game.last_move_source = chess_move.from();
-                                game.last_move_dest = Some(chess_move.to());
+                                game.last_move = Some(chess_move);
                                 if chess_move.is_capture() {
                                     sound = CAPTURE_SOUND;
                                 }
@@ -321,7 +340,7 @@ impl App {
                                 }
                             }
                         }
-                        game.players = data.players;
+                        game.tv_players = data.players;
 
                         let fen = shakmaty::fen::Fen::from_str(&data.fen).unwrap_or_default();
                         game.position = fen
@@ -360,7 +379,7 @@ impl App {
                 let mut bottom_player = String::new();
                 let mut bottom_player_time = String::new();
 
-                for player in &game.players {
+                for player in &game.tv_players {
                     if let Some(ref user) = player.user {
                         if player.color != game.orientation {
                             // top player
@@ -382,7 +401,7 @@ impl App {
                     }
                 }
                 center(column![
-                    container(row![button("Menu").on_press(Message::Menu)])
+                    container(row![button("Back").on_press(Message::Menu)])
                         .width(640)
                         .padding(5),
                     container(row![
@@ -409,30 +428,23 @@ impl App {
                 let mut bottom_player = String::new();
                 let mut bottom_player_time = String::new();
 
-                for player in &game.players {
-                    if let Some(ref user) = player.user {
-                        if player.color != game.orientation {
-                            // top player
-                            top_player = format!("{} ({})", user.name, player.rating);
-                            if player.color == LichessColor::White {
-                                top_player_time = milliseconds_to_clock(game.white_clock);
-                            } else {
-                                top_player_time = milliseconds_to_clock(game.black_clock);
-                            }
-                        } else {
-                            // bottom player
-                            bottom_player = format!("{} ({})", user.name, player.rating);
-                            if player.color == LichessColor::White {
-                                bottom_player_time = milliseconds_to_clock(game.white_clock);
-                            } else {
-                                bottom_player_time = milliseconds_to_clock(game.black_clock);
-                            }
-                        }
+                match game.orientation {
+                    LichessColor::White => {
+                        top_player = format!("{} ({})", game.black_name, game.black_rating);
+                        top_player_time = milliseconds_to_clock(game.black_clock);
+                        bottom_player = format!("{} ({})", game.white_name, game.white_rating);
+                        bottom_player_time = milliseconds_to_clock(game.white_clock);
+                    }
+                    LichessColor::Black => {
+                        top_player = format!("{} ({})", game.white_name, game.white_rating);
+                        top_player_time = milliseconds_to_clock(game.white_clock);
+                        bottom_player = format!("{} ({})", game.black_name, game.black_rating);
+                        bottom_player_time = milliseconds_to_clock(game.black_clock);
                     }
                 }
 
-                center(column![
-                    container(row![button("Menu").on_press(Message::Menu)])
+                let mut col = column![
+                    container(row![button("Back").on_press(Message::Menu)])
                         .width(640)
                         .padding(5),
                     container(row![
@@ -450,8 +462,45 @@ impl App {
                     ])
                     .width(640)
                     .padding(5),
-                ])
-                .into()
+                ];
+
+                if let Some(winner) = game.winner {
+                    col = col.push(text(format!("{:?} is victorious!", winner)));
+                }
+                if let Some(status) = game.status {
+                    match status {
+                        LichessGameStatusName::Aborted => {
+                            col = col.push(text("Aborted"));
+                        }
+                        LichessGameStatusName::Draw => {
+                            col = col.push(text("Draw"));
+                        }
+                        LichessGameStatusName::InsufficientMaterialClaim => {
+                            col = col.push(text("Insufficient Material"));
+                        }
+                        LichessGameStatusName::Mate => {
+                            col = col.push(text("Checkmate"));
+                        }
+                        LichessGameStatusName::NoStart => {
+                            col = col.push(text("No Start"));
+                        }
+                        LichessGameStatusName::Outoftime => {
+                            col = col.push(text("Out of time"));
+                        }
+                        LichessGameStatusName::Resign => {
+                            col = col.push(text("Resign"));
+                        }
+                        LichessGameStatusName::Stalemate => {
+                            col = col.push(text("Stalemate"));
+                        }
+                        LichessGameStatusName::Timeout => {
+                            col = col.push(text("Out of time"));
+                        }
+                        _ => {}
+                    }
+                }
+
+                center(col).into()
             }
         }
     }
@@ -520,6 +569,12 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     }
                 }
                 ConnInput::Play => {
+                    if let Ok(me) = client.account().profile().await {
+                        let _ = output
+                            .send(Message::SetUsername(me.user.username.clone()))
+                            .await;
+                        println!("\n✅ Signed in as {} ({})\n", me.user.username, me.url);
+                    }
                     let mut out_clone = output.clone();
                     let client_clone = client.clone();
                     feed_task = Some(tokio::spawn(async move {
@@ -771,22 +826,21 @@ impl canvas::Program<Message> for Game {
                 let rect = canvas::Path::rectangle(top_left, square_size);
 
                 // last move highlight
-                if let Some(s) = self.last_move_source {
-                    if s == square {
-                        if light_square {
-                            color = light_last_move_color;
-                        } else {
-                            color = dark_last_move_color;
-                        };
-                    }
-                }
-                if let Some(s) = self.last_move_dest {
-                    if s == square {
-                        if light_square {
-                            color = light_last_move_color;
-                        } else {
-                            color = dark_last_move_color;
-                        };
+                if let Some(lm) = self.last_move {
+                    if let Some(from) = lm.from() {
+                        if from == square {
+                            if light_square {
+                                color = light_last_move_color;
+                            } else {
+                                color = dark_last_move_color;
+                            };
+                        } else if lm.to() == square {
+                            if light_square {
+                                color = light_last_move_color;
+                            } else {
+                                color = dark_last_move_color;
+                            };
+                        }
                     }
                 }
 
