@@ -2,7 +2,7 @@ use litchee::LichessClient;
 use litchee::api::broadcasting::tv::{LichessTvFeedEvent, LichessTvFeedPlayer};
 use litchee::api::gameplay::board::{LichessBoardEvent, LichessIncomingEvent};
 use litchee::api::gameplay::games::LichessGameStatusName;
-use litchee::model::LichessColor;
+use litchee::model::{LichessColor, LichessUser};
 
 use shakmaty::Position;
 
@@ -12,7 +12,7 @@ use iced::futures::channel::mpsc;
 use iced::futures::sink::SinkExt;
 
 use iced::advanced::svg::{Handle, Svg};
-use iced::widget::{Action, button, canvas, center, column, container, row, space, text};
+use iced::widget::{Action, button, canvas, center, column, container, grid, row, space, text};
 use iced::{Alignment, Point, Rectangle, Renderer, Size, Subscription, Theme, mouse};
 
 use std::str::FromStr;
@@ -76,6 +76,8 @@ struct Game {
 
 enum Screen {
     Menu,
+    Friends(Vec<LichessUser>),
+    ChallengeFriend(String),
     Watch(Game),
     Play(Game),
 }
@@ -90,7 +92,11 @@ enum Message {
     Tick(iced::time::Instant),
     Menu,
     Watch,
-    Play,
+    Play((f32, u32)),
+    PlayFriend((u32, u32, String)),
+    ChallengeFriend(String),
+    Friends,
+    FriendFetched(LichessUser),
     PlayAi,
     Login,
     Logout,
@@ -104,9 +110,11 @@ enum ConnInput {
     Menu,
     Login,
     Watch,
-    Play,
+    Play((f32, u32)),
+    PlayFriend((u32, u32, String)),
     PlayAi,
     ChessMove((String, String)),
+    FetchFriends,
 }
 
 fn main() -> iced::Result {
@@ -171,9 +179,32 @@ impl App {
                 }
                 self.screen = Screen::Watch(Game::default());
             }
-            Message::Play => {
+            Message::Friends => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::Play);
+                    let _ = tx.try_send(ConnInput::FetchFriends);
+                }
+                self.screen = Screen::Friends(vec![]);
+            }
+            Message::FriendFetched(lichess_user) => match &mut self.screen {
+                Screen::Friends(friends) => {
+                    friends.push(lichess_user);
+                }
+                _ => {}
+            },
+            Message::ChallengeFriend(username) => {
+                self.screen = Screen::ChallengeFriend(username);
+            }
+            Message::Play((min, inc)) => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::Play((min, inc)));
+                }
+                let mut game = Game::default();
+                game.interactive = true;
+                self.screen = Screen::Play(game);
+            }
+            Message::PlayFriend((min, inc, username)) => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::PlayFriend((min, inc, username)));
                 }
                 let mut game = Game::default();
                 game.interactive = true;
@@ -188,7 +219,6 @@ impl App {
                 self.screen = Screen::Play(game);
             }
             Message::BoardEvent(event) => {
-                println!("{:?}", event);
                 match self.screen {
                     Screen::Play(ref mut game) => match event {
                         LichessBoardEvent::OpponentGone(_opponent_gone) => {}
@@ -373,7 +403,17 @@ impl App {
             Screen::Menu => {
                 let mut col = column![text("Lichess Iced").size(80), space().height(20),];
                 if self.lichess_token.is_some() {
-                    col = col.push(button("Play").on_press(Message::Play));
+                    col = col.push(
+                        grid!(
+                            button(text("10 + 0").center()).on_press(Message::Play((10.0, 0))),
+                            button(text("10 + 5").center()).on_press(Message::Play((10.0, 5))),
+                            button(text("15 + 10").center()).on_press(Message::Play((15.0, 10))),
+                        )
+                        .columns(3)
+                        .width(250)
+                        .spacing(10),
+                    );
+                    col = col.push(button("Friends").on_press(Message::Friends));
                     col = col.push(button("Play Ai").on_press(Message::PlayAi));
                     col = col.push(button("Watch").on_press(Message::Watch));
                     col = col.push(button("Logout").on_press(Message::Logout));
@@ -382,6 +422,88 @@ impl App {
                     col = col.push(button("Watch").on_press(Message::Watch));
                 };
                 center(col.spacing(20).align_x(Alignment::Center)).into()
+            }
+            Screen::Friends(lichess_users) => {
+                let mut col = column![];
+                for user in lichess_users {
+                    col = col.push(
+                        row![
+                            text(user.username.clone()),
+                            button("Challenge")
+                                .on_press(Message::ChallengeFriend(user.username.clone()))
+                        ]
+                        .spacing(20),
+                    );
+                }
+                column![
+                    row![button("Back").on_press(Message::Menu),].padding(10),
+                    center(col.spacing(10)),
+                ]
+                .into()
+            }
+            Screen::ChallengeFriend(username) => {
+                let mut col = column![
+                    text(format!("Challenge {}", username)).size(20),
+                    space().height(20),
+                ];
+                col = col.push(
+                    grid!(
+                        button(text("1 + 0").center()).on_press(Message::PlayFriend((
+                            1,
+                            0,
+                            username.clone()
+                        ))),
+                        button(text("2 + 1").center()).on_press(Message::PlayFriend((
+                            2,
+                            1,
+                            username.clone()
+                        ))),
+                        button(text("3 + 0").center()).on_press(Message::PlayFriend((
+                            3,
+                            0,
+                            username.clone()
+                        ))),
+                        button(text("3 + 2").center()).on_press(Message::PlayFriend((
+                            3,
+                            2,
+                            username.clone()
+                        ))),
+                        button(text("5 + 0").center()).on_press(Message::PlayFriend((
+                            5,
+                            0,
+                            username.clone()
+                        ))),
+                        button(text("5 + 3").center()).on_press(Message::PlayFriend((
+                            5,
+                            3,
+                            username.clone()
+                        ))),
+                        button(text("10 + 0").center()).on_press(Message::PlayFriend((
+                            10,
+                            0,
+                            username.clone()
+                        ))),
+                        button(text("10 + 5").center()).on_press(Message::PlayFriend((
+                            10,
+                            5,
+                            username.clone()
+                        ))),
+                        button(text("15 + 10").center()).on_press(Message::PlayFriend((
+                            15,
+                            10,
+                            username.clone()
+                        ))),
+                    )
+                    .columns(3)
+                    .width(250)
+                    .spacing(10),
+                );
+                // center(col.spacing(20).align_x(Alignment::Center)).into()
+                column![
+                    row![button("Back").on_press(Message::Menu),].padding(10),
+                    center(col.spacing(10)),
+                ]
+                .into()
             }
             Screen::Watch(game) => {
                 let mut top_player = String::new();
@@ -410,26 +532,26 @@ impl App {
                         }
                     }
                 }
-                center(column![
-                    container(row![button("Back").on_press(Message::Menu)])
+                column![
+                    row![button("Back").on_press(Message::Menu)].padding(10),
+                    center(column![
+                        container(row![
+                            text(top_player),
+                            space::horizontal(),
+                            text(top_player_time)
+                        ])
                         .width(640)
                         .padding(5),
-                    container(row![
-                        text(top_player),
-                        space::horizontal(),
-                        text(top_player_time)
+                        canvas(game).height(SQUARE_SIZE * 8).width(SQUARE_SIZE * 8),
+                        container(row![
+                            text(bottom_player),
+                            space::horizontal(),
+                            text(bottom_player_time)
+                        ])
+                        .width(640)
+                        .padding(5),
                     ])
-                    .width(640)
-                    .padding(5),
-                    canvas(game).height(SQUARE_SIZE * 8).width(SQUARE_SIZE * 8),
-                    container(row![
-                        text(bottom_player),
-                        space::horizontal(),
-                        text(bottom_player_time)
-                    ])
-                    .width(640)
-                    .padding(5),
-                ])
+                ]
                 .into()
             }
             Screen::Play(game) => {
@@ -470,9 +592,6 @@ impl App {
                 }
 
                 let mut col = column![
-                    container(row![button("Back").on_press(Message::Menu)])
-                        .width(640)
-                        .padding(5),
                     container(row![
                         text(top_player),
                         space::horizontal(),
@@ -526,7 +645,11 @@ impl App {
                     }
                 }
 
-                center(col).into()
+                column![
+                    row![button("Back").on_press(Message::Menu)].padding(10),
+                    center(col),
+                ]
+                .into()
             }
         }
     }
@@ -546,16 +669,62 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
         let (sender, mut receiver) = mpsc::channel(100);
         let _ = output.send(Message::Connected(sender)).await;
 
-        let mut feed_task = None;
+        let mut events_task = None;
+        let mut tv_task = None;
+        let mut authenticated = false;
 
         loop {
             use iced_futures::futures::StreamExt;
+
+            // stream events
+            if authenticated && events_task.is_none() {
+                let client_clone = client.clone();
+                let mut out_clone = output.clone();
+                events_task = Some(tokio::spawn(async move {
+                    // Listen for newly created games via incoming events
+                    if let Ok(mut events) = client_clone.board().stream_events().await {
+                        while let Some(item) = events.next().await {
+                            match item {
+                                Ok(LichessIncomingEvent::GameStart { game }) => {
+                                    if let Some(id) = game.id {
+                                        // stream game moves
+                                        match client_clone.board().stream_game(&id).await {
+                                            Ok(mut feed) => {
+                                                while let Some(res) = feed.next().await {
+                                                    match res {
+                                                        Ok(event) => {
+                                                            if let Err(e) = out_clone
+                                                                .send(Message::BoardEvent(event))
+                                                                .await
+                                                            {
+                                                                eprintln!("{:?}", e);
+                                                            }
+                                                        }
+                                                        Err(err) => {
+                                                            eprintln!("stream error: {:?}", err);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("stread game failed: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }));
+            }
 
             let input = receiver.select_next_some().await;
 
             match input {
                 ConnInput::Token(secret) => {
                     if let Ok(c) = LichessClient::builder().token(secret).build() {
+                        authenticated = true;
                         client = c;
                         if let Ok(me) = client.account().profile().await {
                             let _ = output
@@ -575,6 +744,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         let _ = output.send(Message::Authenticated(secret.clone())).await;
                         // Re-build the client, this time carrying the bearer token.
                         if let Ok(c) = LichessClient::builder().token(secret).build() {
+                            authenticated = true;
                             client = c;
                         }
                     }
@@ -593,134 +763,42 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     if let Ok(mut feed) = client.tv().feed().await {
                         // spawn new task for tv feed
                         let mut out_clone = output.clone();
-                        feed_task = Some(tokio::spawn(async move {
+                        tv_task = Some(tokio::spawn(async move {
                             while let Some(Ok(event)) = feed.next().await {
                                 let _ = out_clone.send(Message::TvEvent(event)).await;
                             }
                         }));
                     }
                 }
-                ConnInput::Play => {
-                    let mut out_clone = output.clone();
-                    let client_clone = client.clone();
-                    feed_task = Some(tokio::spawn(async move {
-                        // Listen for newly created games via incoming events
-                        if let Ok(mut events) = client_clone.board().stream_events().await {
-                            while let Some(item) = events.next().await {
-                                match item {
-                                    Ok(LichessIncomingEvent::GameStart { game }) => {
-                                        if let Some(id) = game.id {
-                                            // stream game moves
-                                            match client_clone.board().stream_game(&id).await {
-                                                Ok(mut feed) => {
-                                                    while let Some(res) = feed.next().await {
-                                                        match res {
-                                                            Ok(event) => {
-                                                                if let Err(e) = out_clone
-                                                                    .send(Message::BoardEvent(
-                                                                        event,
-                                                                    ))
-                                                                    .await
-                                                                {
-                                                                    eprintln!("{:?}", e);
-                                                                }
-                                                            }
-                                                            Err(err) => {
-                                                                eprintln!(
-                                                                    "stream error: {:?}",
-                                                                    err
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("stread game failed: {:?}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        println!("item: {:?}", item);
-                                    }
-                                }
-                            }
-                        }
-                    }));
+                ConnInput::Play((min, inc)) => {
                     // seek opponent
-                    let client_clone2 = client.clone();
+                    let client_clone = client.clone();
                     tokio::spawn(async move {
-                        match client_clone2
-                            .board()
-                            .seek()
-                            .rated(false)
-                            .clock(5.0, 0)
-                            .send()
-                            .await
-                        {
-                            Ok(mut feed) => {
-                                while let Some(Ok(e)) = feed.next().await {
-                                    dbg!("seeking...");
-                                    dbg!(e);
-                                }
-                            }
+                        match client_clone.board().seek().clock(min, inc).send().await {
+                            Ok(mut feed) => while let Some(Ok(_)) = feed.next().await {},
                             Err(err) => {
                                 dbg!(err.to_string());
                             }
                         }
-                        dbg!("seek finished");
                     });
                 }
-                ConnInput::PlayAi => {
-                    let mut out_clone = output.clone();
-                    let client_clone = client.clone();
-                    feed_task = Some(tokio::spawn(async move {
-                        // Listen for newly created games via incoming events
-                        if let Ok(mut events) = client_clone.board().stream_events().await {
-                            // Send the challenge request
-                            let _ = client_clone.challenges().challenge_ai(4).send().await;
-
-                            while let Some(item) = events.next().await {
-                                match item {
-                                    Ok(LichessIncomingEvent::GameStart { game }) => {
-                                        if let Some(id) = game.id {
-                                            // stream game moves
-                                            match client_clone.board().stream_game(&id).await {
-                                                Ok(mut feed) => {
-                                                    while let Some(res) = feed.next().await {
-                                                        match res {
-                                                            Ok(event) => {
-                                                                if let Err(e) = out_clone
-                                                                    .send(Message::BoardEvent(
-                                                                        event,
-                                                                    ))
-                                                                    .await
-                                                                {
-                                                                    eprintln!("{:?}", e);
-                                                                }
-                                                            }
-                                                            Err(err) => {
-                                                                eprintln!(
-                                                                    "stream error: {:?}",
-                                                                    err
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("stread game failed: {:?}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        println!("item: {:?}", item);
-                                    }
-                                }
-                            }
+                ConnInput::PlayFriend((min, inc, username)) => {
+                    match client
+                        .challenges()
+                        .challenge(&username)
+                        .clock(min, inc)
+                        .send()
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(err) => {
+                            dbg!(err.to_string());
                         }
-                    }));
+                    }
+                }
+                ConnInput::PlayAi => {
+                    // Send the challenge request
+                    let _ = client.challenges().challenge_ai(4).send().await;
                 }
                 ConnInput::ChessMove((id, chess_move)) => {
                     if let Err(err) = client.board().make_move(&id, &chess_move, false).await {
@@ -728,9 +806,25 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     }
                 }
                 ConnInput::Menu => {
-                    if let Some(task) = feed_task.take() {
+                    if let Some(task) = tv_task.take() {
                         task.abort();
                     }
+                }
+                ConnInput::FetchFriends => {
+                    let mut out_clone = output.clone();
+                    let client_clone = client.clone();
+                    tokio::spawn(async move {
+                        match client_clone.relations().following().await {
+                            Ok(mut feed) => {
+                                while let Some(Ok(user)) = feed.next().await {
+                                    let _ = out_clone.send(Message::FriendFetched(user)).await;
+                                }
+                            }
+                            Err(err) => {
+                                dbg!(err);
+                            }
+                        }
+                    });
                 }
             }
         }

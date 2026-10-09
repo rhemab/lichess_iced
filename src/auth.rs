@@ -44,7 +44,9 @@ pub async fn run_login(
         Scope::PuzzleRead,
         Scope::StudyRead,
         Scope::BoardPlay,
-        Scope::BotPlay,
+        Scope::FollowRead,
+        Scope::ChallengeRead,
+        Scope::ChallengeWrite,
     ];
     let auth = client.oauth().authorization_url(&AuthorizationRequest {
         client_id,
