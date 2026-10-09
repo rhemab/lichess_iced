@@ -40,7 +40,12 @@ pub async fn run_login(
 ) -> Result<litchee::api::auth::oauth::LichessToken, Box<dyn Error>> {
     // Ask for read access to puzzle activity and (private) studies. Exporting a
     // user's own games needs no special scope.
-    let scopes = [Scope::PuzzleRead, Scope::StudyRead, Scope::BoardPlay];
+    let scopes = [
+        Scope::PuzzleRead,
+        Scope::StudyRead,
+        Scope::BoardPlay,
+        Scope::BotPlay,
+    ];
     let auth = client.oauth().authorization_url(&AuthorizationRequest {
         client_id,
         redirect_uri: REDIRECT_URI,

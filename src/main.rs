@@ -1,6 +1,6 @@
 use litchee::LichessClient;
 use litchee::api::broadcasting::tv::{LichessTvFeedEvent, LichessTvFeedPlayer};
-use litchee::api::gameplay::board::LichessBoardEvent;
+use litchee::api::gameplay::board::{LichessBoardEvent, LichessIncomingEvent};
 use litchee::model::LichessColor;
 
 use shakmaty::Position;
@@ -54,6 +54,7 @@ struct App {
 
 #[derive(Default)]
 struct Game {
+    id: String,
     history: Vec<String>, // all moves so far, in UCI
     interactive: bool,
     fen: String,
@@ -85,6 +86,7 @@ enum Message {
     Watch,
     Play,
     Login,
+    Logout,
     ChessMove([shakmaty::Square; 2]),
     BoardEvent(LichessBoardEvent),
 }
@@ -96,7 +98,7 @@ enum ConnInput {
     Login,
     Watch,
     Play,
-    ChessMove(String),
+    ChessMove((String, String)),
 }
 
 fn main() -> iced::Result {
@@ -151,6 +153,10 @@ impl App {
                     let _ = tx.try_send(ConnInput::Login);
                 }
             }
+            Message::Logout => {
+                self.lichess_token = None;
+                let _ = delete_token();
+            }
             Message::Watch => {
                 if let Some(ref mut tx) = self.conn_tx {
                     let _ = tx.try_send(ConnInput::Watch);
@@ -165,73 +171,79 @@ impl App {
                 game.interactive = true;
                 self.screen = Screen::Play(game);
             }
-            Message::BoardEvent(event) => match self.screen {
-                Screen::Play(ref mut game) => match event {
-                    LichessBoardEvent::OpponentGone(_opponent_gone) => {}
-                    LichessBoardEvent::GameFull(game_full) => {
-                        println!("{:?}", game_full);
-                        if let Some(black_player) = game_full.black {
-                            if let Some(name) = black_player.name {
-                                if name == self.username {
-                                    game.orientation = LichessColor::Black;
-                                }
-                            }
-                        }
-                    }
-                    LichessBoardEvent::GameState(game_state) => {
-                        println!("{:?}", game_state);
-                        game.white_clock = game_state.wtime;
-                        game.black_clock = game_state.btime;
-                        let moves: Vec<String> = game_state
-                            .moves
-                            .split_whitespace()
-                            .map(|s| s.to_string())
-                            .collect();
-                        if moves.len() == game.history.len() + 1 {
-                            // make opponent's move
-                            if let Some(opponent_move) = moves.last() {
-                                game.history.push(opponent_move.to_string());
-                                if let Ok(uci) = opponent_move.parse::<shakmaty::uci::UciMove>() {
-                                    if let Ok(legal_move) = uci.to_move(&game.position) {
-                                        if legal_move.is_capture() {
-                                            if let Ok(source) =
-                                                Decoder::new(std::io::Cursor::new(CAPTURE_SOUND))
-                                            {
-                                                self.audio_player.stop();
-                                                self.audio_player.append(source);
-                                            }
-                                        } else {
-                                            if let Ok(source) =
-                                                Decoder::new(std::io::Cursor::new(MOVE_SOUND))
-                                            {
-                                                self.audio_player.stop();
-                                                self.audio_player.append(source);
-                                            }
-                                        }
-                                        if let Ok(new_pos) = game.position.clone().play(legal_move)
-                                        {
-                                            game.position = new_pos;
-                                        }
+            Message::BoardEvent(event) => {
+                println!("{:?}", event);
+                match self.screen {
+                    Screen::Play(ref mut game) => match event {
+                        LichessBoardEvent::OpponentGone(_opponent_gone) => {}
+                        LichessBoardEvent::GameFull(game_full) => {
+                            println!("{:?}", game_full);
+                            game.id = game_full.id.clone();
+                            if let Some(black_player) = game_full.black {
+                                if let Some(name) = black_player.name {
+                                    if name == self.username {
+                                        game.orientation = LichessColor::Black;
                                     }
                                 }
                             }
-                        } else if moves.len() == game.history.len() {
-                            // validate my last move
-                            if let Some(server_last) = moves.last() {
-                                if let Some(local_last) = game.history.last() {
-                                    if server_last != local_last {
-                                        // reconcile board state
+                        }
+                        LichessBoardEvent::GameState(game_state) => {
+                            println!("{:?}", game_state);
+                            game.white_clock = game_state.wtime;
+                            game.black_clock = game_state.btime;
+                            let moves: Vec<String> = game_state
+                                .moves
+                                .split_whitespace()
+                                .map(|s| s.to_string())
+                                .collect();
+                            if moves.len() == game.history.len() + 1 {
+                                // make opponent's move
+                                if let Some(opponent_move) = moves.last() {
+                                    game.history.push(opponent_move.to_string());
+                                    if let Ok(uci) = opponent_move.parse::<shakmaty::uci::UciMove>()
+                                    {
+                                        if let Ok(legal_move) = uci.to_move(&game.position) {
+                                            if legal_move.is_capture() {
+                                                if let Ok(source) = Decoder::new(
+                                                    std::io::Cursor::new(CAPTURE_SOUND),
+                                                ) {
+                                                    self.audio_player.stop();
+                                                    self.audio_player.append(source);
+                                                }
+                                            } else {
+                                                if let Ok(source) =
+                                                    Decoder::new(std::io::Cursor::new(MOVE_SOUND))
+                                                {
+                                                    self.audio_player.stop();
+                                                    self.audio_player.append(source);
+                                                }
+                                            }
+                                            if let Ok(new_pos) =
+                                                game.position.clone().play(legal_move)
+                                            {
+                                                game.position = new_pos;
+                                            }
+                                        }
                                     }
                                 }
+                            } else if moves.len() == game.history.len() {
+                                // validate my last move
+                                if let Some(server_last) = moves.last() {
+                                    if let Some(local_last) = game.history.last() {
+                                        if server_last != local_last {
+                                            // reconcile board state
+                                        }
+                                    }
+                                }
+                            } else {
+                                // reconcile board state
                             }
-                        } else {
-                            // reconcile board state
                         }
-                    }
+                        _ => {}
+                    },
                     _ => {}
-                },
-                _ => {}
-            },
+                }
+            }
             Message::Tick(_) => match self.screen {
                 Screen::Watch(ref mut game) => game.tick_clock(),
                 Screen::Play(ref mut game) => game.tick_clock(),
@@ -247,7 +259,10 @@ impl App {
                     if let Ok(legal_move) = uci_move.to_move(&game.position) {
                         // send move as uci string to ConnInput
                         if let Some(ref mut tx) = self.conn_tx {
-                            let _ = tx.try_send(ConnInput::ChessMove(uci_move.to_string()));
+                            let _ = tx.try_send(ConnInput::ChessMove((
+                                game.id.clone(),
+                                uci_move.to_string(),
+                            )));
                         }
                         if legal_move.is_capture() {
                             if let Ok(source) = Decoder::new(std::io::Cursor::new(CAPTURE_SOUND)) {
@@ -328,17 +343,16 @@ impl App {
                 } else {
                     button("Login").on_press(Message::Login)
                 };
-                center(
-                    column![
-                        text("Lichess Iced").size(80),
-                        space().height(20),
-                        play_button,
-                        button("Watch").on_press(Message::Watch),
-                    ]
-                    .spacing(20)
-                    .align_x(Alignment::Center),
-                )
-                .into()
+                let mut content = column![
+                    text("Lichess Iced").size(80),
+                    space().height(20),
+                    play_button,
+                    button("Watch").on_press(Message::Watch),
+                ];
+                if self.lichess_token.is_some() {
+                    content = content.push(button("Logout").on_press(Message::Logout));
+                }
+                center(content.spacing(20).align_x(Alignment::Center)).into()
             }
             Screen::Watch(game) => {
                 let mut top_player = String::new();
@@ -458,7 +472,6 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
         let _ = output.send(Message::Connected(sender)).await;
 
         let mut feed_task = None;
-        let mut game_id = None;
 
         loop {
             use iced_futures::futures::StreamExt;
@@ -507,28 +520,64 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     }
                 }
                 ConnInput::Play => {
-                    if let Ok(lichess_game) = client.challenges().challenge_ai(1).send().await {
-                        game_id = Some(lichess_game.id.clone());
-                        if let Ok(mut feed) = client.board().stream_game(&lichess_game.id).await {
-                            let mut out_clone = output.clone();
-                            feed_task = Some(tokio::spawn(async move {
-                                while let Some(Ok(event)) = feed.next().await {
-                                    let _ = out_clone.send(Message::BoardEvent(event)).await;
+                    let mut out_clone = output.clone();
+                    let client_clone = client.clone();
+                    feed_task = Some(tokio::spawn(async move {
+                        // Listen for newly created games via incoming events
+                        if let Ok(mut events) = client_clone.board().stream_events().await {
+                            // Send the challenge request
+                            let _ = client_clone.challenges().challenge_ai(4).send().await;
+
+                            while let Some(item) = events.next().await {
+                                match item {
+                                    Ok(LichessIncomingEvent::GameStart { game }) => {
+                                        if let Some(id) = game.id {
+                                            // stream game moves
+                                            match client_clone.board().stream_game(&id).await {
+                                                Ok(mut feed) => {
+                                                    while let Some(res) = feed.next().await {
+                                                        match res {
+                                                            Ok(event) => {
+                                                                if let Err(e) = out_clone
+                                                                    .send(Message::BoardEvent(
+                                                                        event,
+                                                                    ))
+                                                                    .await
+                                                                {
+                                                                    eprintln!("{:?}", e);
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                eprintln!(
+                                                                    "stream error: {:?}",
+                                                                    err
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("stread game failed: {:?}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        println!("item: {:?}", item);
+                                    }
                                 }
-                            }));
+                            }
                         }
-                    }
+                    }));
                 }
-                ConnInput::ChessMove(chess_move) => {
-                    println!("{:?}", chess_move);
-                    if let Some(id) = &game_id {
-                        let _ = client.board().make_move(&id, &chess_move, false);
+                ConnInput::ChessMove((id, chess_move)) => {
+                    if let Err(err) = client.board().make_move(&id, &chess_move, false).await {
+                        eprintln!("move failed: {:?}", err);
                     }
                 }
                 ConnInput::Menu => {
                     if let Some(task) = feed_task.take() {
                         task.abort();
-                        game_id = None;
                     }
                 }
             }
@@ -817,7 +866,7 @@ fn load_token() -> Option<String> {
     entry.get_password().ok()
 }
 
-// fn delete_token() -> Result<(), keyring::Error> {
-//     let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)?;
-//     entry.delete_password()
-// }
+fn delete_token() -> Result<(), keyring::Error> {
+    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)?;
+    entry.delete_credential()
+}
