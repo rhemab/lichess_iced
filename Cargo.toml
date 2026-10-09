@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 iced = { version = "0.14.0", features = ["tokio", "canvas", "svg", "advanced", "wgpu"] }
 iced_futures = "0.14.0"
+keyring = "4.2.0"
 litchee = "0.2.0"
 rodio = { version = "0.22.2", features = ["playback"] }
 shakmaty = { version = "0.30.1", features = ["variant"] }
