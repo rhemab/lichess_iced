@@ -108,6 +108,9 @@ enum Message {
     BoardEvent(LichessBoardEvent),
     AllIncomingChallenges(Vec<LichessChallenge>),
     NewChallenge(LichessChallenge),
+    AcceptChallenge(String),
+    DeclineChallenge(String),
+    GameStart(String),
 }
 
 #[derive(Debug)]
@@ -121,6 +124,9 @@ enum ConnInput {
     PlayAi,
     ChessMove((String, String)),
     FetchFriends,
+    AcceptChallenge(String),
+    DeclineChallenge(String),
+    StreamGame(String),
 }
 
 fn main() -> iced::Result {
@@ -211,26 +217,36 @@ impl App {
                     }
                 }
             }
+            Message::AcceptChallenge(id) => {
+                if let Some(tx) = &mut self.conn_tx {
+                    let _ = tx.try_send(ConnInput::AcceptChallenge(id));
+                }
+            }
+            Message::DeclineChallenge(id) => {
+                if let Some(tx) = &mut self.conn_tx {
+                    let _ = tx.try_send(ConnInput::DeclineChallenge(id));
+                }
+            }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
                     let _ = tx.try_send(ConnInput::Play((min, inc)));
                 }
-                let mut game = Game::default();
-                game.interactive = true;
-                self.screen = Screen::Play(game);
             }
             Message::PlayFriend((min, inc, username)) => {
                 if let Some(ref mut tx) = self.conn_tx {
                     let _ = tx.try_send(ConnInput::PlayFriend((min, inc, username)));
                 }
-                let mut game = Game::default();
-                game.interactive = true;
-                self.screen = Screen::Play(game);
             }
             Message::PlayAi => {
                 if let Some(ref mut tx) = self.conn_tx {
                     let _ = tx.try_send(ConnInput::PlayAi);
                 }
+            }
+            Message::GameStart(id) => {
+                if let Some(tx) = &mut self.conn_tx {
+                    let _ = tx.try_send(ConnInput::StreamGame(id));
+                }
+
                 let mut game = Game::default();
                 game.interactive = true;
                 self.screen = Screen::Play(game);
@@ -448,8 +464,12 @@ impl App {
                         top_row = top_row
                             .push(row![
                                 text(format!("Challenge from: {}", challenger.name)),
-                                button("Accept").style(button::success),
-                                button("Decline").style(button::danger),
+                                button("Accept")
+                                    .style(button::success)
+                                    .on_press(Message::AcceptChallenge(challenge.id.clone())),
+                                button("Decline")
+                                    .style(button::danger)
+                                    .on_press(Message::DeclineChallenge(challenge.id.clone())),
                             ])
                             .align_y(Alignment::Center)
                             .spacing(5);
@@ -703,6 +723,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
         let mut events_task = None;
         let mut tv_task = None;
         let mut seek_task = None;
+        let mut game_feed_task = None;
         let mut authenticated = false;
 
         loop {
@@ -734,29 +755,8 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                             match event {
                                 LichessIncomingEvent::GameStart { game } => {
                                     if let Some(id) = game.id {
-                                        // stream game moves
-                                        match client_clone.board().stream_game(&id).await {
-                                            Ok(mut feed) => {
-                                                while let Some(res) = feed.next().await {
-                                                    match res {
-                                                        Ok(event) => {
-                                                            if let Err(e) = out_clone
-                                                                .send(Message::BoardEvent(event))
-                                                                .await
-                                                            {
-                                                                eprintln!("{:?}", e);
-                                                            }
-                                                        }
-                                                        Err(err) => {
-                                                            eprintln!("stream error: {:?}", err);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                eprintln!("stread game failed: {:?}", e);
-                                            }
-                                        }
+                                        // switch to Screen::Play
+                                        let _ = out_clone.send(Message::GameStart(id)).await;
                                     }
                                 }
                                 LichessIncomingEvent::Challenge { challenge } => {
@@ -830,6 +830,14 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         }
                     }
                 }
+                ConnInput::AcceptChallenge(id) => {
+                    if let Err(e) = client.challenges().accept(&id, None).await {
+                        dbg!(e);
+                    }
+                }
+                ConnInput::DeclineChallenge(id) => {
+                    let _ = client.challenges().decline(&id, None).await;
+                }
                 ConnInput::PlayAi => {
                     // Send the challenge request
                     let _ = client.challenges().challenge_ai(4).send().await;
@@ -839,11 +847,26 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         eprintln!("move failed: {:?}", err);
                     }
                 }
+                ConnInput::StreamGame(id) => {
+                    let client_clone = client.clone();
+                    let mut out_clone = output.clone();
+                    game_feed_task = Some(tokio::spawn(async move {
+                        // stream game moves
+                        if let Ok(mut feed) = client_clone.board().stream_game(&id).await {
+                            while let Some(Ok(event)) = feed.next().await {
+                                let _ = out_clone.send(Message::BoardEvent(event)).await;
+                            }
+                        }
+                    }));
+                }
                 ConnInput::Menu => {
                     if let Some(task) = tv_task.take() {
                         task.abort();
                     }
                     if let Some(task) = seek_task.take() {
+                        task.abort();
+                    }
+                    if let Some(task) = game_feed_task.take() {
                         task.abort();
                     }
                 }
