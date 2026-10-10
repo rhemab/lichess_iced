@@ -205,7 +205,11 @@ impl App {
                 self.challenges = challenges;
             }
             Message::NewChallenge(challenge) => {
-                self.challenges.push(challenge);
+                if let Some(challenger) = &challenge.challenger {
+                    if challenger.name != self.username {
+                        self.challenges.push(challenge);
+                    }
+                }
             }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -483,49 +487,19 @@ impl App {
                 ];
                 col = col.push(
                     grid!(
-                        button(text("1 + 0").center()).on_press(Message::PlayFriend((
-                            1,
+                        button(text("15 + 0").center()).on_press(Message::PlayFriend((
+                            15,
                             0,
-                            username.clone()
-                        ))),
-                        button(text("2 + 1").center()).on_press(Message::PlayFriend((
-                            2,
-                            1,
-                            username.clone()
-                        ))),
-                        button(text("3 + 0").center()).on_press(Message::PlayFriend((
-                            3,
-                            0,
-                            username.clone()
-                        ))),
-                        button(text("3 + 2").center()).on_press(Message::PlayFriend((
-                            3,
-                            2,
-                            username.clone()
-                        ))),
-                        button(text("5 + 0").center()).on_press(Message::PlayFriend((
-                            5,
-                            0,
-                            username.clone()
-                        ))),
-                        button(text("5 + 3").center()).on_press(Message::PlayFriend((
-                            5,
-                            3,
-                            username.clone()
-                        ))),
-                        button(text("10 + 0").center()).on_press(Message::PlayFriend((
-                            10,
-                            0,
-                            username.clone()
-                        ))),
-                        button(text("10 + 5").center()).on_press(Message::PlayFriend((
-                            10,
-                            5,
                             username.clone()
                         ))),
                         button(text("15 + 10").center()).on_press(Message::PlayFriend((
                             15,
                             10,
+                            username.clone()
+                        ))),
+                        button(text("30 + 0").center()).on_press(Message::PlayFriend((
+                            30,
+                            0,
                             username.clone()
                         ))),
                     )
