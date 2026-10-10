@@ -107,6 +107,7 @@ enum Message {
     ChessMove([shakmaty::Square; 2]),
     BoardEvent(LichessBoardEvent),
     AllIncomingChallenges(Vec<LichessChallenge>),
+    NewChallenge(LichessChallenge),
 }
 
 #[derive(Debug)]
@@ -202,6 +203,9 @@ impl App {
             }
             Message::AllIncomingChallenges(challenges) => {
                 self.challenges = challenges;
+            }
+            Message::NewChallenge(challenge) => {
+                self.challenges.push(challenge);
             }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -320,7 +324,10 @@ impl App {
             }
             Message::Tick(_) => match self.screen {
                 Screen::Watch(ref mut game) => game.tick_clock(1),
-                Screen::Play(ref mut game) => game.tick_clock(1000),
+                Screen::Play(ref mut game) => match game.status {
+                    Some(LichessGameStatusName::Started) => game.tick_clock(1000),
+                    _ => {}
+                },
                 _ => {}
             },
             Message::ChessMove([from_square, to_square]) => match self.screen {
@@ -749,9 +756,9 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 
                     // Listen for newly created games via incoming events
                     if let Ok(mut events) = client_clone.board().stream_events().await {
-                        while let Some(item) = events.next().await {
-                            match item {
-                                Ok(LichessIncomingEvent::GameStart { game }) => {
+                        while let Some(Ok(event)) = events.next().await {
+                            match event {
+                                LichessIncomingEvent::GameStart { game } => {
                                     if let Some(id) = game.id {
                                         // stream game moves
                                         match client_clone.board().stream_game(&id).await {
@@ -777,6 +784,9 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                                             }
                                         }
                                     }
+                                }
+                                LichessIncomingEvent::Challenge { challenge } => {
+                                    let _ = out_clone.send(Message::NewChallenge(*challenge)).await;
                                 }
                                 _ => {}
                             }
@@ -886,23 +896,18 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 
 impl Game {
     fn tick_clock(&mut self, increment: i64) {
-        match self.status {
-            Some(LichessGameStatusName::Started) => {
-                match self.position.turn() {
-                    shakmaty::Color::White => {
-                        if self.white_clock > 0 {
-                            self.white_clock -= increment;
-                        }
-                    }
-                    shakmaty::Color::Black => {
-                        if self.black_clock > 0 {
-                            self.black_clock -= increment;
-                        }
-                    }
-                };
+        match self.position.turn() {
+            shakmaty::Color::White => {
+                if self.white_clock > 0 {
+                    self.white_clock -= increment;
+                }
             }
-            _ => {}
-        }
+            shakmaty::Color::Black => {
+                if self.black_clock > 0 {
+                    self.black_clock -= increment;
+                }
+            }
+        };
     }
 
     fn get_square(&self, x: u32, y: u32) -> shakmaty::Square {
