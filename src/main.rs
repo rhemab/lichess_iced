@@ -55,6 +55,7 @@ struct App {
     lichess_token: Option<String>,
     conn_tx: Option<mpsc::Sender<ConnInput>>,
     challenges: Vec<LichessChallenge>,
+    seeking: bool,
 }
 
 #[derive(Default)]
@@ -111,6 +112,7 @@ enum Message {
     AcceptChallenge(String),
     DeclineChallenge(String),
     GameStart(String),
+    CancelSeek,
 }
 
 #[derive(Debug)]
@@ -127,16 +129,22 @@ enum ConnInput {
     AcceptChallenge(String),
     DeclineChallenge(String),
     StreamGame(String),
+    CancelSeek,
 }
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .centered()
+        .theme(App::theme)
         .subscription(App::subscription)
         .run()
 }
 
 impl App {
+    fn theme(&self) -> Theme {
+        iced::Theme::CatppuccinFrappe
+    }
+
     fn new() -> Self {
         let mut sink_handle =
             rodio::DeviceSinkBuilder::open_default_sink().expect("open default audio stream");
@@ -151,6 +159,7 @@ impl App {
             lichess_token: load_token(),
             conn_tx: None,
             challenges: vec![],
+            seeking: false,
         }
     }
 
@@ -231,6 +240,13 @@ impl App {
                 if let Some(ref mut tx) = self.conn_tx {
                     let _ = tx.try_send(ConnInput::Play((min, inc)));
                 }
+                self.seeking = true;
+            }
+            Message::CancelSeek => {
+                if let Some(ref mut tx) = self.conn_tx {
+                    let _ = tx.try_send(ConnInput::CancelSeek);
+                }
+                self.seeking = false;
             }
             Message::PlayFriend((min, inc, username)) => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -243,6 +259,7 @@ impl App {
                 }
             }
             Message::GameStart(id) => {
+                self.seeking = false;
                 if let Some(tx) = &mut self.conn_tx {
                     let _ = tx.try_send(ConnInput::StreamGame(id));
                 }
@@ -476,11 +493,30 @@ impl App {
                     }
                 }
 
-                column![
+                let main_content = column![
                     top_row.align_y(Alignment::Center).spacing(5).padding(10),
                     center(col.spacing(20).align_x(Alignment::Center)),
-                ]
-                .into()
+                ];
+
+                let loading = opaque(
+                    container(
+                        column![
+                            "Seeking...",
+                            button("Cancel")
+                                .style(button::danger)
+                                .on_press(Message::CancelSeek)
+                        ]
+                        .spacing(20),
+                    )
+                    .padding(20)
+                    .style(container::rounded_box),
+                );
+
+                if self.seeking {
+                    stack![main_content, center(loading),].into()
+                } else {
+                    main_content.into()
+                }
             }
             Screen::Friends(lichess_users) => {
                 let mut col = column![];
@@ -815,6 +851,11 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                             }
                         }
                     }));
+                }
+                ConnInput::CancelSeek => {
+                    if let Some(task) = seek_task.take() {
+                        task.abort();
+                    }
                 }
                 ConnInput::PlayFriend((min, inc, username)) => {
                     match client
