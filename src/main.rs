@@ -167,7 +167,7 @@ impl App {
         match message {
             Message::Connected(mut tx) => {
                 if let Some(token) = &self.lichess_token {
-                    let _ = tx.try_send(ConnInput::Token(token.clone()));
+                    tx.try_send(ConnInput::Token(token.clone())).unwrap();
                 }
                 self.conn_tx = Some(tx);
             }
@@ -182,13 +182,13 @@ impl App {
             }
             Message::Menu => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::Menu);
+                    tx.try_send(ConnInput::Menu).unwrap();
                 }
                 self.screen = Screen::Menu;
             }
             Message::Login => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::Login);
+                    tx.try_send(ConnInput::Login).unwrap();
                 }
             }
             Message::Logout => {
@@ -197,13 +197,13 @@ impl App {
             }
             Message::Watch => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::Watch);
+                    tx.try_send(ConnInput::Watch).unwrap();
                 }
                 self.screen = Screen::Watch(Game::default());
             }
             Message::Friends => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::FetchFriends);
+                    tx.try_send(ConnInput::FetchFriends).unwrap();
                 }
                 self.screen = Screen::Friends(vec![]);
             }
@@ -228,42 +228,43 @@ impl App {
             }
             Message::AcceptChallenge(id) => {
                 if let Some(tx) = &mut self.conn_tx {
-                    let _ = tx.try_send(ConnInput::AcceptChallenge(id));
+                    tx.try_send(ConnInput::AcceptChallenge(id)).unwrap();
                 }
                 self.challenges.pop();
             }
             Message::DeclineChallenge(id) => {
                 if let Some(tx) = &mut self.conn_tx {
-                    let _ = tx.try_send(ConnInput::DeclineChallenge(id));
+                    tx.try_send(ConnInput::DeclineChallenge(id)).unwrap();
                 }
                 self.challenges.pop();
             }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::Play((min, inc)));
+                    tx.try_send(ConnInput::Play((min, inc))).unwrap();
                 }
                 self.seeking = true;
             }
             Message::CancelSeek => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::CancelSeek);
+                    tx.try_send(ConnInput::CancelSeek).unwrap();
                 }
                 self.seeking = false;
             }
             Message::PlayFriend((min, inc, username)) => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::PlayFriend((min, inc, username)));
+                    tx.try_send(ConnInput::PlayFriend((min, inc, username)))
+                        .unwrap();
                 }
             }
             Message::PlayAi => {
                 if let Some(ref mut tx) = self.conn_tx {
-                    let _ = tx.try_send(ConnInput::PlayAi);
+                    tx.try_send(ConnInput::PlayAi).unwrap();
                 }
             }
             Message::GameStart(id) => {
                 self.seeking = false;
                 if let Some(tx) = &mut self.conn_tx {
-                    let _ = tx.try_send(ConnInput::StreamGame(id));
+                    tx.try_send(ConnInput::StreamGame(id)).unwrap();
                 }
 
                 let mut game = Game::default();
@@ -380,10 +381,11 @@ impl App {
                     if let Ok(legal_move) = uci_move.to_move(&game.position) {
                         // send move as uci string to ConnInput
                         if let Some(ref mut tx) = self.conn_tx {
-                            let _ = tx.try_send(ConnInput::ChessMove((
+                            tx.try_send(ConnInput::ChessMove((
                                 game.id.clone(),
                                 uci_move.to_string(),
-                            )));
+                            )))
+                            .unwrap();
                         }
                         if legal_move.is_capture() {
                             sound = CAPTURE_SOUND;
@@ -760,7 +762,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
         let mut client = LichessClient::new();
 
         let (sender, mut receiver) = mpsc::channel(100);
-        let _ = output.send(Message::Connected(sender)).await;
+        output.send(Message::Connected(sender)).await.unwrap();
 
         let mut events_task = None;
         let mut tv_task = None;
@@ -778,17 +780,19 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                 events_task = Some(tokio::spawn(async move {
                     // set username
                     if let Ok(me) = client_clone.account().profile().await {
-                        let _ = out_clone
+                        out_clone
                             .send(Message::SetUsername(me.user.username.clone()))
-                            .await;
+                            .await
+                            .unwrap();
                     }
 
                     // fetch challenges
                     if let Ok(challenges) = client_clone.challenges().list().await {
                         // send incoming challenges
-                        let _ = out_clone
+                        out_clone
                             .send(Message::AllIncomingChallenges(challenges.incoming))
-                            .await;
+                            .await
+                            .unwrap();
                     }
 
                     // Listen for newly created games via incoming events
@@ -798,11 +802,14 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                                 LichessIncomingEvent::GameStart { game } => {
                                     if let Some(id) = game.id {
                                         // switch to Screen::Play
-                                        let _ = out_clone.send(Message::GameStart(id)).await;
+                                        out_clone.send(Message::GameStart(id)).await.unwrap();
                                     }
                                 }
                                 LichessIncomingEvent::Challenge { challenge } => {
-                                    let _ = out_clone.send(Message::NewChallenge(*challenge)).await;
+                                    out_clone
+                                        .send(Message::NewChallenge(*challenge))
+                                        .await
+                                        .unwrap();
                                 }
                                 _ => {}
                             }
@@ -827,7 +834,10 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                     // An unauthenticated client is enough to build the authorization URL.
                     if let Some(token) = crate::auth::run_login(&client, &client_id).await.ok() {
                         let secret = token.access_token.into_inner();
-                        let _ = output.send(Message::Authenticated(secret.clone())).await;
+                        output
+                            .send(Message::Authenticated(secret.clone()))
+                            .await
+                            .unwrap();
                         // Re-build the client, this time carrying the bearer token.
                         if let Ok(c) = LichessClient::builder().token(secret).build() {
                             authenticated = true;
@@ -841,7 +851,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         let mut out_clone = output.clone();
                         tv_task = Some(tokio::spawn(async move {
                             while let Some(Ok(event)) = feed.next().await {
-                                let _ = out_clone.send(Message::TvEvent(event)).await;
+                                out_clone.send(Message::TvEvent(event)).await.unwrap();
                             }
                         }));
                     }
@@ -901,7 +911,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         // stream game moves
                         if let Ok(mut feed) = client_clone.board().stream_game(&id).await {
                             while let Some(Ok(event)) = feed.next().await {
-                                let _ = out_clone.send(Message::BoardEvent(event)).await;
+                                out_clone.send(Message::BoardEvent(event)).await.unwrap();
                             }
                         }
                     }));
@@ -924,7 +934,7 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
                         match client_clone.relations().following().await {
                             Ok(mut feed) => {
                                 while let Some(Ok(user)) = feed.next().await {
-                                    let _ = out_clone.send(Message::FriendFetched(user)).await;
+                                    out_clone.send(Message::FriendFetched(user)).await.unwrap();
                                 }
                             }
                             Err(err) => {
