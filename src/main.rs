@@ -1147,16 +1147,25 @@ impl canvas::Program<Message> for Game {
                     }
                 }
 
-                frame.fill(&rect, color);
-
                 // prevent drawing duplicate piece while dragging
+                // highlight dragging from square while dragging
                 if state.dragging_piece.is_some()
                     && let Some(from_square) = state.drag_from_square
                 {
                     if from_square == square {
+                        if light_square {
+                            color = light_last_move_color;
+                        } else {
+                            color = dark_last_move_color;
+                        };
+
+                        frame.fill(&rect, color);
                         continue;
                     }
                 }
+
+                frame.fill(&rect, color);
+
                 if let Some(piece) = self.position.board().piece_at(square) {
                     let svg = piece_to_svg(piece);
                     frame.draw_svg(Rectangle::new(top_left, square_size), svg);
