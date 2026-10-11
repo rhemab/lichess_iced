@@ -230,11 +230,13 @@ impl App {
                 if let Some(tx) = &mut self.conn_tx {
                     let _ = tx.try_send(ConnInput::AcceptChallenge(id));
                 }
+                self.challenges.pop();
             }
             Message::DeclineChallenge(id) => {
                 if let Some(tx) = &mut self.conn_tx {
                     let _ = tx.try_send(ConnInput::DeclineChallenge(id));
                 }
+                self.challenges.pop();
             }
             Message::Play((min, inc)) => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -479,15 +481,19 @@ impl App {
                 if let Some(challenge) = &self.challenges.last() {
                     if let Some(challenger) = &challenge.challenger {
                         top_row = top_row
-                            .push(row![
-                                text(format!("Challenge from: {}", challenger.name)),
-                                button("Accept")
-                                    .style(button::success)
-                                    .on_press(Message::AcceptChallenge(challenge.id.clone())),
-                                button("Decline")
-                                    .style(button::danger)
-                                    .on_press(Message::DeclineChallenge(challenge.id.clone())),
-                            ])
+                            .push(
+                                row![
+                                    text(format!("Challenge from: {}", challenger.name)),
+                                    button("Accept")
+                                        .style(button::success)
+                                        .on_press(Message::AcceptChallenge(challenge.id.clone())),
+                                    button("Decline")
+                                        .style(button::danger)
+                                        .on_press(Message::DeclineChallenge(challenge.id.clone())),
+                                ]
+                                .align_y(Alignment::Center)
+                                .spacing(5),
+                            )
                             .align_y(Alignment::Center)
                             .spacing(5);
                     }
