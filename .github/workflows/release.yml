@@ -40,13 +40,16 @@ jobs:
       - name: Build App Packages
         run: cargo packager --release
 
+      - name: List Output (debug)
+        shell: bash
+        run: ls -R dist || true
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.target }}
-          path: |
-            target/release/bundle/**/*
-            target/${{ matrix.target }}/release/bundle/**/*
+          path: dist/*
+          if-no-files-found: error
 
   publish:
     name: Publish Release
@@ -58,9 +61,10 @@ jobs:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: artifacts
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: artifacts/**/*
+          fail_on_unmatched_files: true
