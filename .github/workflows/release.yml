@@ -6,11 +6,9 @@ on:
       - 'v*'
 
 jobs:
-  publish:
-    name: Publish for ${{ matrix.os }}
+  build:
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       matrix:
         include:
@@ -42,9 +40,27 @@ jobs:
       - name: Build App Packages
         run: cargo packager --release
 
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: |
+            target/release/bundle/**/*
+            target/${{ matrix.target }}/release/bundle/**/*
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/release/bundler/**/*
-            target/${{ matrix.target }}/release/bundler/**/*
+          files: dist/**/*
