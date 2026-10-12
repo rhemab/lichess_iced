@@ -38,7 +38,7 @@ jobs:
           locked: true
 
       - name: Build App Packages
-        run: cargo packager --release --target ${{ matrix.target }}
+        run: cargo packager --release
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
