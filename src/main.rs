@@ -12,7 +12,7 @@ use rodio::{Decoder, MixerDeviceSink};
 use iced::futures::channel::mpsc;
 use iced::futures::sink::SinkExt;
 
-use iced::advanced::svg::{Handle, Svg};
+use iced::advanced::svg;
 use iced::widget::{
     Action, button, canvas, center, column, container, grid, opaque, row, space, stack, text,
 };
@@ -56,9 +56,25 @@ struct App {
     conn_tx: Option<mpsc::Sender<ConnInput>>,
     challenges: Vec<LichessChallenge>,
     seeking: bool,
+    svg_pieces: SvgPieces,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+struct SvgPieces {
+    wk: svg::Handle,
+    wq: svg::Handle,
+    wb: svg::Handle,
+    wn: svg::Handle,
+    wr: svg::Handle,
+    wp: svg::Handle,
+    bk: svg::Handle,
+    bq: svg::Handle,
+    bb: svg::Handle,
+    bn: svg::Handle,
+    br: svg::Handle,
+    bp: svg::Handle,
+}
+
 struct Game {
     id: String,
     history: Vec<String>, // all moves so far, in UCI
@@ -77,6 +93,7 @@ struct Game {
     tv_players: Vec<LichessTvFeedPlayer>,
     status: Option<LichessGameStatusName>,
     winner: Option<LichessColor>,
+    svg_pieces: SvgPieces,
 }
 
 enum Screen {
@@ -135,6 +152,7 @@ enum ConnInput {
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .centered()
+        .title("Lichess Iced")
         .theme(App::theme)
         .subscription(App::subscription)
         .run()
@@ -142,7 +160,7 @@ fn main() -> iced::Result {
 
 impl App {
     fn theme(&self) -> Theme {
-        iced::Theme::CatppuccinFrappe
+        iced::Theme::Oxocarbon
     }
 
     fn new() -> Self {
@@ -150,6 +168,21 @@ impl App {
             rodio::DeviceSinkBuilder::open_default_sink().expect("open default audio stream");
         sink_handle.log_on_drop(false);
         let audio_player = rodio::Player::connect_new(&sink_handle.mixer());
+
+        let svg_pieces = SvgPieces {
+            wk: svg::Handle::from_memory(WK),
+            wq: svg::Handle::from_memory(WQ),
+            wb: svg::Handle::from_memory(WB),
+            wn: svg::Handle::from_memory(WN),
+            wr: svg::Handle::from_memory(WR),
+            wp: svg::Handle::from_memory(WP),
+            bk: svg::Handle::from_memory(BK),
+            bq: svg::Handle::from_memory(BQ),
+            bb: svg::Handle::from_memory(BB),
+            bn: svg::Handle::from_memory(BN),
+            br: svg::Handle::from_memory(BR),
+            bp: svg::Handle::from_memory(BP),
+        };
 
         App {
             username: String::new(),
@@ -160,6 +193,7 @@ impl App {
             conn_tx: None,
             challenges: vec![],
             seeking: false,
+            svg_pieces,
         }
     }
 
@@ -199,7 +233,7 @@ impl App {
                 if let Some(ref mut tx) = self.conn_tx {
                     tx.try_send(ConnInput::Watch).unwrap();
                 }
-                self.screen = Screen::Watch(Game::default());
+                self.screen = Screen::Watch(Game::new(self.svg_pieces.clone()));
             }
             Message::Friends => {
                 if let Some(ref mut tx) = self.conn_tx {
@@ -267,7 +301,7 @@ impl App {
                     tx.try_send(ConnInput::StreamGame(id)).unwrap();
                 }
 
-                let mut game = Game::default();
+                let mut game = Game::new(self.svg_pieces.clone());
                 game.interactive = true;
                 self.screen = Screen::Play(game);
             }
@@ -429,7 +463,7 @@ impl App {
                         }
                     }
                     LichessTvFeedEvent::Featured(data) => {
-                        *game = Game::default();
+                        *game = Game::new(self.svg_pieces.clone());
                         game.orientation = data.orientation;
                         for player in &data.players {
                             match player.color {
@@ -949,6 +983,44 @@ fn lichess_conn() -> impl iced::futures::Stream<Item = Message> {
 }
 
 impl Game {
+    fn new(svg_pieces: SvgPieces) -> Self {
+        Game {
+            id: String::new(),
+            history: vec![],
+            interactive: false,
+            fen: String::new(),
+            position: shakmaty::Chess::default(),
+            last_move_uci: String::new(),
+            last_move: None,
+            white_clock: 0,
+            black_clock: 0,
+            white_name: String::new(),
+            black_name: String::new(),
+            white_rating: 0,
+            black_rating: 0,
+            orientation: LichessColor::White,
+            tv_players: vec![],
+            status: None,
+            winner: None,
+            svg_pieces,
+        }
+    }
+    fn piece_to_svg(&self, piece: shakmaty::Piece) -> &svg::Handle {
+        match (piece.color, piece.role) {
+            (shakmaty::Color::White, shakmaty::Role::Pawn) => &self.svg_pieces.wp,
+            (shakmaty::Color::White, shakmaty::Role::Knight) => &self.svg_pieces.wn,
+            (shakmaty::Color::White, shakmaty::Role::Bishop) => &self.svg_pieces.wb,
+            (shakmaty::Color::White, shakmaty::Role::Rook) => &self.svg_pieces.wr,
+            (shakmaty::Color::White, shakmaty::Role::Queen) => &self.svg_pieces.wq,
+            (shakmaty::Color::White, shakmaty::Role::King) => &self.svg_pieces.wk,
+            (shakmaty::Color::Black, shakmaty::Role::Pawn) => &self.svg_pieces.bp,
+            (shakmaty::Color::Black, shakmaty::Role::Knight) => &self.svg_pieces.bn,
+            (shakmaty::Color::Black, shakmaty::Role::Bishop) => &self.svg_pieces.bb,
+            (shakmaty::Color::Black, shakmaty::Role::Rook) => &self.svg_pieces.br,
+            (shakmaty::Color::Black, shakmaty::Role::Queen) => &self.svg_pieces.bq,
+            (shakmaty::Color::Black, shakmaty::Role::King) => &self.svg_pieces.bk,
+        }
+    }
     fn tick_clock(&mut self, increment: i64) {
         match self.position.turn() {
             shakmaty::Color::White => {
@@ -1183,7 +1255,7 @@ impl canvas::Program<Message> for Game {
                 frame.fill(&rect, color);
 
                 if let Some(piece) = self.position.board().piece_at(square) {
-                    let svg = piece_to_svg(piece);
+                    let svg = self.piece_to_svg(piece);
                     frame.draw_svg(Rectangle::new(top_left, square_size), svg);
                 }
             }
@@ -1191,28 +1263,11 @@ impl canvas::Program<Message> for Game {
 
         // draw dragged piece
         if let Some(piece) = state.dragging_piece {
-            let svg = piece_to_svg(piece);
+            let svg = self.piece_to_svg(piece);
             frame.draw_svg(Rectangle::new(state.drag_top_left, square_size), svg);
         }
 
         vec![frame.into_geometry()]
-    }
-}
-
-fn piece_to_svg(piece: shakmaty::Piece) -> Svg {
-    match (piece.color, piece.role) {
-        (shakmaty::Color::White, shakmaty::Role::Pawn) => Svg::from(&Handle::from_memory(WP)),
-        (shakmaty::Color::White, shakmaty::Role::Knight) => Svg::from(&Handle::from_memory(WN)),
-        (shakmaty::Color::White, shakmaty::Role::Bishop) => Svg::from(&Handle::from_memory(WB)),
-        (shakmaty::Color::White, shakmaty::Role::Rook) => Svg::from(&Handle::from_memory(WR)),
-        (shakmaty::Color::White, shakmaty::Role::Queen) => Svg::from(&Handle::from_memory(WQ)),
-        (shakmaty::Color::White, shakmaty::Role::King) => Svg::from(&Handle::from_memory(WK)),
-        (shakmaty::Color::Black, shakmaty::Role::Pawn) => Svg::from(&Handle::from_memory(BP)),
-        (shakmaty::Color::Black, shakmaty::Role::Knight) => Svg::from(&Handle::from_memory(BN)),
-        (shakmaty::Color::Black, shakmaty::Role::Bishop) => Svg::from(&Handle::from_memory(BB)),
-        (shakmaty::Color::Black, shakmaty::Role::Rook) => Svg::from(&Handle::from_memory(BR)),
-        (shakmaty::Color::Black, shakmaty::Role::Queen) => Svg::from(&Handle::from_memory(BQ)),
-        (shakmaty::Color::Black, shakmaty::Role::King) => Svg::from(&Handle::from_memory(BK)),
     }
 }
 
